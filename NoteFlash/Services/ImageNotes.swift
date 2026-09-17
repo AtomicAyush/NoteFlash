@@ -29,7 +29,13 @@ nonisolated enum ImageNotes {
         return document.dataRepresentation()
     }
 
-    private static func downscaled(_ data: Data) -> UIImage? {
+    /// A small preview of an image.
+    @concurrent
+    static func thumbnail(of data: Data, maxPixels: Int) async -> UIImage? {
+        downscaled(data, maxPixels: maxPixels)
+    }
+
+    private static func downscaled(_ data: Data, maxPixels: Int = maxPixels) -> UIImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,

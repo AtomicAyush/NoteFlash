@@ -8,6 +8,7 @@ nonisolated enum PDFTextExtractor {
         let text: String
         let pageCount: Int
         let recognizedPageCount: Int
+        let pages: [NotePage]
     }
 
     /// PDFs up to this size are sent to Claude as documents, so scanned pages,
@@ -36,13 +37,15 @@ nonisolated enum PDFTextExtractor {
             producer: attributes[PDFDocumentAttribute.producerAttribute] as? String
         )
         var sampled = 0
-        var pages: [String] = []
+        var pages: [NotePage] = []
         var recognized = 0
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
             let typed = (page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             var text = typed
+            var isRecognized = false
             if typed.count < minimumPageText {
+                isRecognized = true
                 if let scanned = await recognizeText(on: page), scanned.count > typed.count {
                     text = scanned
                     recognized += 1
@@ -54,6 +57,7 @@ nonisolated enum PDFTextExtractor {
                         readsHandwriting = true
                     }
                     if readsHandwriting {
+                        isRecognized = true
                         let merged = RecognizedText.merge(typed: typed, recognized: scanned)
                         if merged != typed {
                             text = merged
@@ -62,10 +66,18 @@ nonisolated enum PDFTextExtractor {
                     }
                 }
             }
-            if !text.isEmpty { pages.append(text) }
+            // Pages that text recognition couldn't read are kept: Apple Intelligence may still read the image.
+            if !text.isEmpty || isRecognized {
+                pages.append(NotePage(index: index, text: text, isRecognized: isRecognized))
+            }
             onPage?(index + 1, document.pageCount)
         }
-        return Result(text: pages.joined(separator: "\n\n"), pageCount: document.pageCount, recognizedPageCount: recognized)
+        return Result(
+            text: pages.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n"),
+            pageCount: document.pageCount,
+            recognizedPageCount: recognized,
+            pages: pages
+        )
     }
 
     private static func recognizeText(on page: PDFPage) async -> String? {

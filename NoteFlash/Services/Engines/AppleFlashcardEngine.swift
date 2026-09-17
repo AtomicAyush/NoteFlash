@@ -1,5 +1,7 @@
+import CryptoKit
 import Foundation
 import FoundationModels
+import PDFKit
 
 // MARK: - Guided-generation types
 
@@ -183,9 +185,30 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     }
 
     func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
-        let notes = source.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !notes.isEmpty else { throw EngineError.noText }
+        var notes = source.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let details: PDFDetails? = if case .pdf(_, _, let details) = source { details } else { nil }
         let instructions = Self.generationInstructions(density: density)
+
+        // Handwritten and scanned pages read best from the page image, where the model supports it.
+        if case .pdf(let data, _, let details?) = source,
+           details.pages.contains(where: \.isRecognized),
+           #available(iOS 27.0, macOS 27.0, *), Self.readsPageImages {
+            do {
+                return try await generateFromPages(data: data, details: details, density: density, progress: progress)
+            } catch where AppleModelFailure(error) == .rateLimited || AppleModelFailure(error) == .cancelled {
+                throw Self.friendlyError(error)
+            } catch {
+                // Fall back to the recognized text below.
+            }
+        }
+
+        guard !notes.isEmpty else { throw EngineError.noText }
+        let readFromHandwriting = details?.pages.contains(where: \.isRecognized) == true
+        // A title heading gives every section the notes' topic (sections after the first
+        // repeat the heading they fall under).
+        if let title = details?.title.flatMap(Self.contextTitle), !notes.hasPrefix("#") {
+            notes = "# \(title)\n" + notes
+        }
         let chunks = NoteChunker.chunks(of: notes, maxCharacters: Self.onDeviceChunkCharacters)
 
         do {
@@ -197,7 +220,10 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     return deck
                 }
             }
-            var deck = try await generate(chunks: chunks, density: density, progress: progress) {
+            var deck = try await generate(
+                chunks: chunks, density: density, progress: progress,
+                requestNote: readFromHandwriting ? Self.handwritingNote : nil
+            ) {
                 Self.onDeviceSession(instructions)
             }
             if chunks.count > 1 || deck.title.isEmpty {
@@ -211,6 +237,226 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         } catch {
             throw Self.friendlyError(error)
         }
+    }
+
+    // MARK: Page images
+
+    private static let handwritingNote = "Parts of these notes were read from handwriting by text recognition, so some words and symbols may be misread; use the most sensible reading, especially for math and code."
+
+    /// Whether the on-device model can read images (iOS 27 and later, on supported devices).
+    @available(iOS 27.0, macOS 27.0, *)
+    static var readsPageImages: Bool {
+        SystemLanguageModel.default.capabilities.contains(.vision)
+    }
+
+    /// A document title worth giving the model as context, skipping generic names like
+    /// "Untitled", "IMG_1234", or "Scanned notes".
+    static func contextTitle(_ title: String) -> String? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        let genericNames: Set<String> = [
+            "untitled", "untitled notebook", "untitled document", "untitled presentation", "document", "notes",
+            "notebook", "new note", "photo", "image", "scan", "scanned notes", "scanned page", "shared image",
+            "shared images", "shared notes", "my notes", "screenshot",
+        ]
+        guard trimmed.count >= 3, !genericNames.contains(lower),
+              lower.wholeMatch(of: #/(img|image|photo|scan|screenshot|document|untitled|notebook|page)[ _-]?\d+/#) == nil,
+              lower.wholeMatch(of: #/\d+ (images|photos|pages|scanned pages)/#) == nil
+        else { return nil }
+        return String(trimmed.prefix(80))
+    }
+
+    /// Writes cards page by page: handwritten and scanned pages are read from their image (with
+    /// the recognized text as a hint), and runs of typed pages go through the text path.
+    @available(iOS 27.0, macOS 27.0, *)
+    private func generateFromPages(data: Data, details: PDFDetails, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
+        guard let document = PDFDocument(data: data) else { throw EngineError.generationFailed("The PDF couldn't be opened.") }
+        let contextTitle = details.title.flatMap(Self.contextTitle)
+
+        enum Part {
+            case typed(String)
+            case page(NotePage)
+        }
+        var parts: [Part] = []
+        var typedRun: [String] = []
+        func flushTyped() {
+            let text = typedRun.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            typedRun = []
+            guard !text.isEmpty else { return }
+            let heading = contextTitle.map { "# \($0)\n" } ?? ""
+            parts += NoteChunker.chunks(of: heading + text, maxCharacters: Self.onDeviceChunkCharacters).map(Part.typed)
+        }
+        for page in details.pages {
+            if page.isRecognized {
+                flushTyped()
+                parts.append(.page(page))
+            } else {
+                typedRun.append(page.text)
+            }
+        }
+        flushTyped()
+
+        let documentKey = SHA256.hash(data: data).prefix(16).map { String(format: "%02x", $0) }.joined()
+        let about = contextTitle.map { " These notes are titled “\($0)”." } ?? ""
+        var title: String?
+        var cards: [GeneratedCard] = []
+        var blockedSections = 0
+
+        for (index, part) in parts.enumerated() {
+            try Task.checkCancellation()
+            let label: String
+            let request: String
+            let key: String
+            switch part {
+            case .typed(let chunk):
+                label = parts.count > 1 ? "Part \(index + 1) of \(parts.count)" : "Writing cards"
+                request = "Write flashcards for this part of the student's notes. Cover every fact in it."
+                key = SectionCache.key(model: "device", density: density, request: request, text: chunk)
+            case .page(let page):
+                label = "Reading page \(page.index + 1) of \(document.pageCount)"
+                request = "Write flashcards for this page of the student's notes, which is handwritten or scanned. Read the page image carefully, including any math, code, and symbols, and cover every fact on it.\(about)"
+                key = SectionCache.key(model: "vision-\(documentKey)-\(page.index)", density: density, request: request, text: page.text)
+            }
+            let partText: String = switch part {
+            case .typed(let chunk): chunk
+            case .page(let page): page.text
+            }
+            let expectedCards = Double(max(3, Self.estimatedCardCount(for: partText, density: density)))
+            let report = { (within: Double, detail: String) in
+                let overall = (Double(index) + min(max(within, 0), 1)) / Double(parts.count)
+                progress?(GenerationProgress(fraction: overall * 0.97, detail: detail))
+            }
+            let onEvent = { (event: SectionEvent) in
+                switch event {
+                case .cards(let count):
+                    report(min(0.95, Double(count) / expectedCards), label)
+                case .waiting(let until):
+                    let overall = Double(index) / Double(parts.count) * 0.97
+                    progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
+                }
+            }
+            report(0, label)
+            if let cached = SectionCache.shared.entry(for: key) {
+                if title == nil, let cachedTitle = cached.title, !cachedTitle.isEmpty { title = cachedTitle }
+                cards += cached.cards
+                report(1, label)
+                continue
+            }
+
+            let outcome = SectionOutcome()
+            let section: SectionCards
+            do {
+                switch part {
+                case .typed(let chunk):
+                    section = try await sectionCards(
+                        for: chunk, request: request, density: density, outcome: outcome, onEvent: onEvent,
+                        makeSession: { Self.onDeviceSession(Self.generationInstructions(density: density)) }
+                    )
+                case .page(let page):
+                    do {
+                        section = try await pageCards(page, in: document, request: request, density: density, outcome: outcome, onEvent: onEvent)
+                    } catch where AppleModelFailure(error) != .rateLimited && AppleModelFailure(error) != .cancelled {
+                        // The image couldn't be used; fall back to the recognized text.
+                        let text = page.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { throw error }
+                        section = try await sectionCards(
+                            for: text, request: "Write flashcards for this page of the student's notes. Cover every fact in it. \(Self.handwritingNote)\(about)",
+                            density: density, outcome: outcome, onEvent: onEvent,
+                            makeSession: { Self.onDeviceSession(Self.generationInstructions(density: density)) }
+                        )
+                    }
+                }
+            } catch where AppleModelFailure(error) == .guardrail {
+                blockedSections += 1
+                report(1, label)
+                continue
+            } catch where AppleModelFailure(error) != .rateLimited && AppleModelFailure(error) != .cancelled && !(error is EngineError) {
+                // One unreadable page shouldn't sink the deck.
+                report(1, label)
+                continue
+            }
+            if outcome.isComplete {
+                SectionCache.shared.store(SectionCache.Entry(title: section.title, cards: section.cards), for: key)
+            }
+            if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
+                title = sectionTitle
+            }
+            cards += section.cards
+            report(1, label)
+        }
+
+        let cleaned = CardWriting.cleaned(cards)
+        guard !cleaned.isEmpty else {
+            throw blockedSections > 0 ? EngineError.blockedBySafetyFilter : DeckCreator.CreationError.noCards
+        }
+        var deckTitle = contextTitle ?? title ?? ""
+        if contextTitle == nil, parts.count > 1 {
+            progress?(GenerationProgress(fraction: 0.98, detail: "Naming your deck"))
+            let allText = details.pages.map(\.text).joined(separator: "\n")
+            if let named = try? await Self.deckTitle(for: allText) { deckTitle = named }
+        }
+        progress?(GenerationProgress(fraction: 1, detail: "Done"))
+        return GeneratedDeck(title: deckTitle.isEmpty ? "My Notes" : deckTitle, cards: cleaned)
+    }
+
+    /// Cards for one page, read from its image.
+    @available(iOS 27.0, macOS 27.0, *)
+    private func pageCards(
+        _ page: NotePage,
+        in document: PDFDocument,
+        request: String,
+        density: CardDensity,
+        outcome: SectionOutcome,
+        onEvent: (SectionEvent) -> Void
+    ) async throws -> SectionCards {
+        guard let pdfPage = document.page(at: page.index), let image = Self.render(pdfPage) else {
+            throw EngineError.generationFailed("The page couldn't be rendered.")
+        }
+        let hint = page.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cap = hint.isEmpty ? 16 : max(8, Self.maximumCardCount(for: hint, density: density))
+        let options = Self.options(maxTokens: min(4_000, 300 + cap * 75))
+        let instructions = Self.generationInstructions(density: density)
+        let prompt: Prompt = hint.isEmpty
+            ? Prompt {
+                request
+                Attachment(image)
+            }
+            : Prompt {
+                request
+                Attachment(image)
+                "Text recognition read this page as follows. It may have misread handwriting, symbols, and math; where it differs from the image, trust the image.\n\n\(hint)"
+            }
+        let set = try await ModelLimits.run(onWait: { onEvent(.waiting($0)) }) {
+            let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
+            return try await Self.streamCardSet(cap: cap, outcome: outcome, onEvent: onEvent) {
+                session.streamResponse(to: prompt, generating: AppleCardSet.self, options: options)
+            }
+        }
+        var cards = set.cards.map(\.card)
+        if !hint.isEmpty {
+            cards = Self.faithful(cards, to: hint + "\n" + set.cards.map(\.fact).joined(separator: "\n"))
+        }
+        return SectionCards(title: set.title, cards: Array(cards.prefix(cap)))
+    }
+
+    /// Renders a page for the model, white background, longest side `maxPixels`.
+    static func render(_ page: PDFPage, maxPixels: CGFloat = 1_536) -> CGImage? {
+        let bounds = page.bounds(for: .mediaBox)
+        let longest = max(bounds.width, bounds.height)
+        guard longest > 0 else { return nil }
+        let scale = min(maxPixels / longest, 4)
+        let width = Int(bounds.width * scale)
+        let height = Int(bounds.height * scale)
+        guard width > 0, height > 0,
+              let context = CGContext(
+                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+              ) else { return nil }
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        page.draw(with: .mediaBox, to: context)
+        return context.makeImage()
     }
 
     @available(iOS 27.0, macOS 27.0, *)
@@ -230,6 +476,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         density: CardDensity,
         progress: GenerationProgressHandler?,
         model: String = "device",
+        requestNote: String? = nil,
         makeSession: () -> LanguageModelSession
     ) async throws -> GeneratedDeck {
         var title: String?
@@ -238,9 +485,10 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
 
         for (index, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
-            let request = chunks.count > 1
+            var request = chunks.count > 1
                 ? "Write flashcards for this part of the student's notes. Cover every fact in it."
                 : "Write flashcards for the student's notes. Cover every fact in them."
+            if let requestNote { request += " " + requestNote }
             let label = chunks.count > 1 ? "Section \(index + 1) of \(chunks.count)" : "Writing cards"
             let expectedCards = Double(Self.estimatedCardCount(for: chunk, density: density))
             // Sections share 97% of the bar; naming the deck takes the rest.
@@ -525,37 +773,9 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             return try await ModelLimits.run(onWait: { onEvent(.waiting($0)) }) {
                 let session = makeSession()
                 let options = Self.options(maxTokens: min(4_000, 300 + cap * 75))
-                var latest: AppleCardSet.PartiallyGenerated?
-                var end = ModelLimits.StreamEnd.finished
-                do {
-                    (_, end) = try await ModelLimits.watch(
-                        produce: { box in
-                            for try await snapshot in session.streamResponse(to: prompt, generating: AppleCardSet.self, options: options) {
-                                box.update(snapshot.content)
-                                if box.isStopRequested { break }
-                            }
-                        },
-                        onOutput: { (content: AppleCardSet.PartiallyGenerated, stop) in
-                            latest = content
-                            let count = content.cards?.count ?? 0
-                            onEvent(.cards(count))
-                            // Stop a runaway response; the cards written so far are kept below.
-                            if count > cap { stop() }
-                        }
-                    )
-                } catch where !(error is CancellationError) && !Self.completeCards(in: latest).isEmpty {
-                    // The model stopped partway (for example at its length cap); keep what it wrote.
-                    end = .stalled
-                }
-                if end == .stalled {
-                    // Keep a stalled response only if it got a good way through the section.
-                    guard Self.completeCards(in: latest).count >= max(1, cap / 4) else { throw ModelLimits.Stalled() }
-                    outcome.isComplete = false
-                }
-                guard let latest else { throw EngineError.generationFailed("The model returned no output.") }
-                // Build the result from the last snapshot rather than re-parsing the raw output.
-                let cards = Array(Self.completeCards(in: latest).prefix(cap))
-                return [AppleCardSet(title: latest.title ?? "", cards: cards)]
+                return [try await Self.streamCardSet(cap: cap, outcome: outcome, onEvent: onEvent) {
+                    session.streamResponse(to: prompt, generating: AppleCardSet.self, options: options)
+                }]
             }
         } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             let halves = NoteChunker.halves(of: text)
@@ -573,6 +793,46 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             }
             return sets
         }
+    }
+
+    /// Streams one card set, watching for stalls and stopping runaway responses. A response that
+    /// stops partway is kept if it got a good way through (and marked incomplete).
+    private static func streamCardSet(
+        cap: Int,
+        outcome: SectionOutcome,
+        onEvent: (SectionEvent) -> Void,
+        stream: @escaping @Sendable () -> LanguageModelSession.ResponseStream<AppleCardSet>
+    ) async throws -> AppleCardSet {
+        var latest: AppleCardSet.PartiallyGenerated?
+        var end = ModelLimits.StreamEnd.finished
+        do {
+            (_, end) = try await ModelLimits.watch(
+                produce: { box in
+                    for try await snapshot in stream() {
+                        box.update(snapshot.content)
+                        if box.isStopRequested { break }
+                    }
+                },
+                onOutput: { (content: AppleCardSet.PartiallyGenerated, stop) in
+                    latest = content
+                    let count = content.cards?.count ?? 0
+                    onEvent(.cards(count))
+                    // Stop a runaway response; the cards written so far are kept below.
+                    if count > cap { stop() }
+                }
+            )
+        } catch where !(error is CancellationError) && !completeCards(in: latest).isEmpty {
+            // The model stopped partway (for example at its length cap); keep what it wrote.
+            end = .stalled
+        }
+        if end == .stalled {
+            // Keep a stalled response only if it got a good way through.
+            guard completeCards(in: latest).count >= max(1, cap / 4) else { throw ModelLimits.Stalled() }
+            outcome.isComplete = false
+        }
+        guard let latest else { throw EngineError.generationFailed("The model returned no output.") }
+        // Build the result from the last snapshot rather than re-parsing the raw output.
+        return AppleCardSet(title: latest.title ?? "", cards: Array(completeCards(in: latest).prefix(cap)))
     }
 
     private static func completeCards(in snapshot: AppleCardSet.PartiallyGenerated?) -> [AppleCard] {

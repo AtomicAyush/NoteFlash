@@ -41,6 +41,8 @@ nonisolated struct DriveFileContent: Sendable {
     var pdfData: Data?
     /// Pages in a PDF or slides in a presentation.
     var pageCount: Int?
+    /// A PDF's text page by page.
+    var pdfPages: [NotePage]?
     /// Identifies this version of the file, to skip unchanged files when syncing.
     var version: String?
 }
@@ -325,7 +327,7 @@ final class DriveFileReader {
             guard let extracted else { throw DeckCreator.CreationError.unreadablePDF }
             return DriveFileContent(
                 title: title.map(stripExtension), text: extracted.text, kind: .pdf,
-                pdfData: data, pageCount: extracted.pageCount, version: version
+                pdfData: data, pageCount: extracted.pageCount, pdfPages: extracted.pages, version: version
             )
         }
         if PowerPointTextExtractor.isPresentation(data) {

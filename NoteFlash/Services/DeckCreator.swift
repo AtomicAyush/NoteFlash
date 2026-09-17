@@ -104,7 +104,10 @@ enum DeckCreator {
 
             let noteSource: NoteSource
             if let pdf = content.pdfData {
-                noteSource = .pdf(data: pdf, text: content.text)
+                noteSource = .pdf(
+                    data: pdf, text: content.text,
+                    details: content.pdfPages.map { PDFDetails(pages: $0, title: content.title) }
+                )
                 reporter.send(.workload(characters: workload(forPDF: pdf, pages: content.pageCount ?? 0, text: content.text, engine: engineKind), engine: engineKind))
             } else {
                 noteSource = .text(notes)
@@ -140,13 +143,14 @@ enum DeckCreator {
         reporter.send(.phase(images.count == 1 ? "Preparing your image" : "Preparing \(images.count) images"))
         guard let pdf = await ImageNotes.makePDF(from: images) else { throw CreationError.unsupportedFile }
         return try await pdfDeck(
-            pdf, fileName: name, title: title, reading: images.count == 1 ? "your image" : "your images",
+            pdf, fileName: name, title: title, titleIsFromFile: false,
+            reading: images.count == 1 ? "your image" : "your images",
             density: density, engine: engine, engineKind: engineKind, context: context, reporter: reporter
         )
     }
 
     private static func pdfDeck(
-        _ data: Data, fileName: String, title: String?, reading: String, density: CardDensity,
+        _ data: Data, fileName: String, title: String?, titleIsFromFile: Bool = true, reading: String, density: CardDensity,
         engine: any FlashcardEngine, engineKind: AIEngineKind, context: ModelContext, reporter: ProcessingReporter
     ) async throws -> Deck {
         reporter.send(.phase("Reading \(reading)"))
@@ -156,7 +160,14 @@ enum DeckCreator {
         guard let extracted else { throw CreationError.unreadablePDF }
         reporter.send(.workload(characters: workload(forPDF: data, pages: extracted.pageCount, text: extracted.text, engine: engineKind), engine: engineKind))
         let generated = try await engine.generateDeck(
-            from: .pdf(data: data, text: extracted.text),
+            from: .pdf(
+                data: data,
+                text: extracted.text,
+                details: PDFDetails(
+                    pages: extracted.pages,
+                    title: title ?? (titleIsFromFile ? DriveFileReader.stripExtension(fileName) : nil)
+                )
+            ),
             density: density,
             progress: reporter.generationHandler
         )

@@ -6,7 +6,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
 
 - **Three ways to add notes:**
   - **Text:** type or paste notes.
-  - **File:** import a PDF, a PowerPoint (.pptx) file, or a photo of your notes. Scanned pages and handwriting go through on-device text recognition. Slides contribute their titles, text, tables, and speaker notes.
+  - **File:** tap **Choose Notes** to take photos with the document scanner (it straightens and crops each page), choose photos from your library, or pick a PDF, PowerPoint (.pptx) file, or images from Files. Several photos become one deck, a page per photo. Slides contribute their titles, text, tables, and speaker notes.
   - **Google Drive:** use a Google Doc, Google Slides presentation, PDF, or PowerPoint file from Drive, or paste a link. Browse your Drive like the Drive app: My Drive folders, Shared, Starred, Recent, and search by name or text. Preview the text before using a file.
     - **Sorting:** Name, Last modified, Last modified by me, Last opened by me, Storage used, and (in Shared) Date shared, in either direction.
     - **View:** list or grid, with folders on top or mixed with files (list view).
@@ -94,6 +94,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Notification:** the extension posts a notification that opens NoteFlash.
 - **Import:** each time the app becomes active, `SharedNotesImporter` starts a normal background job for each item and deletes it.
 - **Images:** turned into a PDF, one page per image, so they can be viewed, read with text recognition, and sent to Claude like any PDF.
+- **Page images (iOS 27):** when the on-device model can read images, handwritten and scanned pages go to Apple Intelligence as images, with the Vision text as a hint, so handwriting, math, and symbols are read in context. Runs of typed pages still use text. If a page image fails, that page falls back to its recognized text.
+- **Context for every section:** the document's title (unless it's a generic name like "Scan" or "IMG_1234") heads the notes, so every section knows the topic. When pages were read from handwriting, the model is told to expect misread words and symbols.
 - **Handwriting:** PDF pages with little selectable text are read with Vision. For PDFs from note-taking apps, or whose first pages show much more text than they contain, every page is also read with Vision. Lines not already in the typed text are added.
 
 **Keeping cards in sync.**

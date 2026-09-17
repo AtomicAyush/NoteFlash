@@ -39,15 +39,31 @@ nonisolated struct ExistingCard: Encodable, Sendable {
 
 nonisolated enum NoteSource: Sendable {
     case text(String)
-    /// A PDF along with its extracted (and OCR'd) text.
-    case pdf(data: Data, text: String)
+    /// A PDF along with its extracted (and OCR'd) text, and page details when known.
+    case pdf(data: Data, text: String, details: PDFDetails? = nil)
 
     var text: String {
         switch self {
         case .text(let text): text
-        case .pdf(_, let text): text
+        case .pdf(_, let text, _): text
         }
     }
+}
+
+/// One page of a PDF's text.
+nonisolated struct NotePage: Sendable {
+    /// The page's position in the PDF.
+    let index: Int
+    let text: String
+    /// Read (at least partly) with text recognition: handwriting, a scan, or a photo.
+    let isRecognized: Bool
+}
+
+/// What's known about a PDF beyond its text.
+nonisolated struct PDFDetails: Sendable {
+    var pages: [NotePage]
+    /// The document's name, which gives every section of the notes some context.
+    var title: String?
 }
 
 /// How far along an engine is with writing a deck.

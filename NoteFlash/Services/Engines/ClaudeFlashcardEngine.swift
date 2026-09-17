@@ -30,7 +30,7 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
         switch source {
         case .text(let notes):
             content.append(.text("<notes>\n\(notes)\n</notes>"))
-        case .pdf(let data, let text):
+        case .pdf(let data, let text, _):
             // Claude reads PDFs directly (scans, tables, diagrams) when they fit in a request.
             if data.count <= PDFTextExtractor.maxDocumentBytes {
                 content.append(.pdf(base64: data.base64EncodedString()))
@@ -69,7 +69,7 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
         let input: Int
         switch source {
         case .text(let text): input = text.count
-        case .pdf(let data, let text): input = text.isEmpty ? data.count / 20 : text.count
+        case .pdf(let data, let text, _): input = text.isEmpty ? data.count / 20 : text.count
         }
         let ratio = switch density {
         case .essentials: 0.6

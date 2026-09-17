@@ -197,7 +197,7 @@ final class DocSyncService {
 
             let engineKind = AIEngineKind.selected
             let engine = try engineKind.makeEngine()
-            let characters = if case .pdf(let data, _) = source {
+            let characters = if case .pdf(let data, _, _) = source {
                 DeckCreator.workload(forPDF: data, pages: PDFTextExtractor.pageCount(of: data) ?? 0, text: notes, engine: engineKind)
             } else {
                 notes.count

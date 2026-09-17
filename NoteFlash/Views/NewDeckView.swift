@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -28,18 +29,20 @@ struct NewDeckView: View {
         }
     }
 
-    /// A PDF, PowerPoint, or image file picked from Files or opened from another app.
+    /// A PDF or PowerPoint file, or photos of notes, picked for a new deck.
     nonisolated private struct PickedFile: Sendable {
         enum Kind: Sendable {
             case pdf
             case presentation
-            case image
+            /// One or more photos or scanned pages, made into one deck.
+            case images
         }
 
         let name: String
-        let data: Data
+        /// The file, or each image.
+        let items: [Data]
         let kind: Kind
-        /// "12 pages", "8 slides", or "Image"
+        /// "12 pages", "8 slides", or "3 photos"
         let summary: String
         /// Approximate notes length, for the time estimate.
         let characters: Int
@@ -59,6 +62,9 @@ struct NewDeckView: View {
     @State private var pickedFile: PickedFile?
     @State private var isReadingFile = false
     @State private var isImportingFile = false
+    @State private var isScanning = false
+    @State private var isChoosingPhotos = false
+    @State private var photoSelection: [PhotosPickerItem] = []
     @State private var driveLink = ""
     @State private var selectedFile: DriveItem?
     @State private var isPickingFile = false
@@ -155,11 +161,33 @@ struct NewDeckView: View {
             .fileImporter(
                 isPresented: $isImportingFile,
                 allowedContentTypes: [.pdf, Self.powerPointType, .image],
-                onCompletion: importFile
+                allowsMultipleSelection: true,
+                onCompletion: importFiles
             )
+            .photosPicker(
+                isPresented: $isChoosingPhotos,
+                selection: $photoSelection,
+                maxSelectionCount: 30,
+                selectionBehavior: .ordered,
+                matching: .images
+            )
+            .onChange(of: photoSelection) {
+                guard !photoSelection.isEmpty else { return }
+                let items = photoSelection
+                photoSelection = []
+                Task { await loadPhotos(items) }
+            }
+            .fullScreenCover(isPresented: $isScanning) {
+                DocumentScannerView { pages in
+                    isScanning = false
+                    guard !pages.isEmpty else { return }
+                    pickImages(pages, name: "Scanned notes", summary: Self.pageCount(pages.count, noun: "page"))
+                }
+                .ignoresSafeArea()
+            }
             .task {
                 if case .file(let name, let data) = incoming?.content, pickedFile == nil {
-                    await pick(data, name: name)
+                    await pick([(name, data)])
                 }
             }
             .sheet(isPresented: $isPickingFile) {
@@ -206,22 +234,21 @@ struct NewDeckView: View {
                     Label(pickedFile.name, systemImage: Self.systemImage(for: pickedFile.kind))
                         .lineLimit(2)
                 }
-                Button("Choose a Different File") { isImportingFile = true }
+                if pickedFile.kind == .images {
+                    ImageThumbnailStrip(images: pickedFile.items)
+                }
+                chooseMenu(title: "Choose Something Else", systemImage: "arrow.triangle.2.circlepath")
             } else if isReadingFile {
                 HStack {
-                    Text("Reading file…")
+                    Text("Reading…")
                     Spacer()
                     ProgressView()
                 }
             } else {
-                Button {
-                    isImportingFile = true
-                } label: {
-                    Label("Choose PDF, PowerPoint, or Image…", systemImage: "doc.badge.plus")
-                }
+                chooseMenu(title: "Choose Notes…", systemImage: "doc.badge.plus")
             }
         } header: {
-            Text("PDF, PowerPoint, or Image")
+            Text("Photos, PDF, or PowerPoint")
         } footer: {
             fileFooter
         }
@@ -321,47 +348,103 @@ struct NewDeckView: View {
 
     // MARK: Actions
 
-    private func importFile(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let url):
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-            let data: Data
-            do {
-                data = try Data(contentsOf: url)
-            } catch {
-                errorMessage = error.localizedDescription
-                return
+    /// Take photos, pick from the photo library, or pick files.
+    private func chooseMenu(title: String, systemImage: String) -> some View {
+        Menu {
+            if DocumentScannerView.isAvailable {
+                Button("Take Photos", systemImage: "camera") { isScanning = true }
             }
-            let name = url.lastPathComponent
-            Task { await pick(data, name: name) }
+            Button("Choose from Photos", systemImage: "photo.on.rectangle") { isChoosingPhotos = true }
+            Button("Choose from Files", systemImage: "folder") { isImportingFile = true }
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
+    }
+
+    private func importFiles(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            var files: [(name: String, data: Data)] = []
+            for url in urls {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    files.append((url.lastPathComponent, try Data(contentsOf: url)))
+                } catch {
+                    errorMessage = error.localizedDescription
+                    return
+                }
+            }
+            guard !files.isEmpty else { return }
+            Task { await pick(files) }
         case .failure(let error):
             errorMessage = error.localizedDescription
         }
     }
 
-    private func pick(_ data: Data, name: String) async {
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        errorMessage = nil
+        isReadingFile = true
+        defer { isReadingFile = false }
+        var images: [Data] = []
+        for item in items {
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                images.append(data)
+            }
+        }
+        guard !images.isEmpty else {
+            errorMessage = "Those photos couldn't be loaded. If they're in iCloud, make sure the iPhone is online."
+            return
+        }
+        pickImages(images, name: "Photos of your notes", summary: Self.pageCount(images.count, noun: "photo"))
+    }
+
+    private func pickImages(_ images: [Data], name: String, summary: String) {
+        errorMessage = nil
+        pickedFile = PickedFile(
+            name: name, items: images, kind: .images, summary: summary,
+            characters: ProcessingEstimator.estimatedCharacters(pdfPages: images.count)
+        )
+    }
+
+    /// Several images become one deck; otherwise pick a single PDF or PowerPoint file.
+    private func pick(_ files: [(name: String, data: Data)]) async {
         errorMessage = nil
         pickedFile = nil
         isReadingFile = true
         defer { isReadingFile = false }
         do {
-            pickedFile = try await Self.inspect(data, name: name)
+            if files.count == 1, let file = files.first {
+                pickedFile = try await Self.inspect(file.data, name: file.name)
+            } else if await Self.allImages(files.map(\.data)) {
+                pickImages(files.map(\.data), name: "Images from Files", summary: Self.pageCount(files.count, noun: "image"))
+            } else {
+                errorMessage = "Choose one PDF or PowerPoint file at a time, or several images."
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    @concurrent
+    private static func allImages(_ items: [Data]) async -> Bool {
+        items.allSatisfy(ImageNotes.isImage)
+    }
+
+    private static func pageCount(_ count: Int, noun: String) -> String {
+        count == 1 ? "1 \(noun)" : "\(count) \(noun)s"
     }
 
     private var fileFooter: Text {
         switch pickedFile?.kind {
         case .presentation:
             Text("Slide titles, text, tables, and speaker notes become your notes. Pictures and charts aren't read.")
-        case .pdf, .image:
+        case .pdf, .images:
             engine == .claude
                 ? Text("Claude reads the whole page, including handwriting, tables, and diagrams.")
                 : Text("Text is read on this iPhone. Handwriting and scanned pages go through on-device text recognition.")
         case nil:
-            Text("Choose a PDF, a PowerPoint (.pptx) file, or a photo of your notes. From GoodNotes and similar apps, export as PDF and tap NoteFlash in the share sheet. For files in Google Drive, use the Google Drive tab so the deck stays in sync.")
+            Text("Take photos of paper notes, choose them from your photo library, or pick a PDF or PowerPoint (.pptx) file. From GoodNotes and similar apps, export as PDF and tap NoteFlash in the share sheet. For files in Google Drive, use the Google Drive tab so the deck stays in sync.")
         }
     }
 
@@ -369,7 +452,7 @@ struct NewDeckView: View {
         switch kind {
         case .pdf: "doc.richtext.fill"
         case .presentation: "rectangle.on.rectangle.fill"
-        case .image: "photo.fill"
+        case .images: "photo.on.rectangle.angled"
         }
     }
 
@@ -382,11 +465,11 @@ struct NewDeckView: View {
                 throw DriveFileReader.ReadError.empty
             }
             let summary = slides.slideCount == 1 ? "1 slide" : "\(slides.slideCount) slides"
-            return PickedFile(name: name, data: data, kind: .presentation, summary: summary, characters: slides.text.count)
+            return PickedFile(name: name, items: [data], kind: .presentation, summary: summary, characters: slides.text.count)
         }
         if ImageNotes.isImage(data) {
             return PickedFile(
-                name: name, data: data, kind: .image, summary: "Image",
+                name: name, items: [data], kind: .images, summary: "1 image",
                 characters: ProcessingEstimator.estimatedCharacters(pdfPages: 1)
             )
         }
@@ -395,7 +478,7 @@ struct NewDeckView: View {
         }
         let summary = pages == 1 ? "1 page" : "\(pages) pages"
         return PickedFile(
-            name: name, data: data, kind: .pdf, summary: summary,
+            name: name, items: [data], kind: .pdf, summary: summary,
             characters: ProcessingEstimator.estimatedCharacters(pdfPages: pages)
         )
     }
@@ -434,8 +517,15 @@ struct NewDeckView: View {
             jobTitle = trimmedTitle.isEmpty ? String((firstLine ?? "Your notes").prefix(40)) : trimmedTitle
         case .file:
             guard let pickedFile else { return }
-            deckSource = .file(fileName: pickedFile.name, data: pickedFile.data)
-            jobTitle = DriveFileReader.stripExtension(pickedFile.name)
+            if pickedFile.kind == .images {
+                deckSource = .images(name: pickedFile.name, data: pickedFile.items)
+                jobTitle = pickedFile.name
+            } else if let data = pickedFile.items.first {
+                deckSource = .file(fileName: pickedFile.name, data: data)
+                jobTitle = DriveFileReader.stripExtension(pickedFile.name)
+            } else {
+                return
+            }
         case .drive:
             guard let reference = chosenReference else {
                 errorMessage = DriveFileReader.ReadError.invalidLink.localizedDescription

@@ -361,6 +361,7 @@
 				INFOPLIST_FILE = "NoteFlash-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = NoteFlash;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_NSCameraUsageDescription = "NoteFlash uses the camera to photograph your notes and turn them into flashcards.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -397,6 +398,7 @@
 				INFOPLIST_FILE = "NoteFlash-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = NoteFlash;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_NSCameraUsageDescription = "NoteFlash uses the camera to photograph your notes and turn them into flashcards.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
