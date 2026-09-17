@@ -22,6 +22,8 @@ final class ShareModel {
             case pdf
             case powerPoint
             case image
+            /// A web page: a deck someone shared from NoteFlash, or any other saved page.
+            case page
         }
 
         let name: String
@@ -41,6 +43,9 @@ final class ShareModel {
 
     private(set) var state: State = .loading
     private(set) var payload: Payload?
+    /// Set when what was shared is a deck from NoteFlash, which is added as it is rather than
+    /// being written again by the AI.
+    private(set) var sharedDeck: SharedDeck?
     var title = ""
     var density = "balanced"
 
@@ -64,6 +69,7 @@ final class ShareModel {
                 case .pdf: "PDF"
                 case .powerPoint: "PowerPoint"
                 case .image: "Image"
+                case .page: sharedDeck == nil ? "Web page" : "Flashcards"
                 }
             } else if files.allSatisfy({ $0.kind == .image }) {
                 "\(files.count) images"
@@ -81,7 +87,9 @@ final class ShareModel {
         case .link(let url):
             url.absoluteString
         case .files(let files):
-            if files.count == 1, let file = files.first, file.kind == .pdf, let draft,
+            if let deck = sharedDeck {
+                Self.deckDetail(deck)
+            } else if files.count == 1, let file = files.first, file.kind == .pdf, let draft,
                let pages = PDFDocument(url: draft.fileURL(file.name))?.pageCount {
                 "\(file.name) · \(pages == 1 ? "1 page" : "\(pages) pages")"
             } else if files.allSatisfy({ $0.kind == .image }) {
@@ -94,13 +102,21 @@ final class ShareModel {
         }
     }
 
+    /// "10 cards · 2 on the exam"
+    private static func deckDetail(_ deck: SharedDeck) -> String {
+        let cards = deck.cards.count == 1 ? "1 card" : "\(deck.cards.count) cards"
+        return deck.priorityCount > 0 ? "\(cards) · \(deck.priorityCount) on the exam" : cards
+    }
+
     var systemImage: String {
         switch payload {
         case .text: "text.alignleft"
         case .link: "link"
         case .files(let files):
-            files.allSatisfy { $0.kind == .image } ? "photo.on.rectangle"
-                : files.first?.kind == .powerPoint ? "rectangle.on.rectangle" : "doc.richtext"
+            if sharedDeck != nil { "rectangle.stack.fill" }
+            else if files.allSatisfy({ $0.kind == .image }) { "photo.on.rectangle" }
+            else if files.first?.kind == .powerPoint { "rectangle.on.rectangle" }
+            else { "doc.richtext" }
         case nil: "doc"
         }
     }
@@ -127,7 +143,12 @@ final class ShareModel {
                 return
             }
             payload = chosen
-            title = found.suggestedTitle ?? ""
+            // A deck someone shared is added exactly as they made it, so there's nothing to set up.
+            if case .files(let files) = chosen, files.count == 1, files[0].kind == .page,
+               let data = try? Data(contentsOf: draft.fileURL(files[0].name)) {
+                sharedDeck = DeckShare.deck(inPage: data)
+            }
+            title = sharedDeck?.title ?? found.suggestedTitle ?? ""
             state = .ready
         } catch {
             draft?.discard()
@@ -230,6 +251,8 @@ final class ShareModel {
             return .file(SharedFile(name: try draft.addFile(at: url, preferredName: name), kind: .powerPoint))
         case _ where imageExtensions.contains(ext):
             return .file(SharedFile(name: try draft.addFile(at: url, preferredName: name), kind: .image))
+        case "html", "htm", "xhtml":
+            return .file(SharedFile(name: try draft.addFile(at: url, preferredName: name), kind: .page))
         case "txt", "md", "text", "markdown":
             return .text(try String(contentsOf: url, encoding: .utf8))
         case "goodnotes":
@@ -330,7 +353,9 @@ final class ShareModel {
             return
         }
         Self.askForBackgroundTime()
-        let notified = await Self.notify(title: deckTitle, several: makesSeveralDecks, itemID: draft.id)
+        let notified = await Self.notify(
+            title: deckTitle, several: makesSeveralDecks, isDeck: sharedDeck != nil, itemID: draft.id
+        )
         state = .saved(notified: notified)
         if notified {
             try? await Task.sleep(for: .seconds(1.5))
@@ -358,17 +383,23 @@ final class ShareModel {
     }
 
     /// A notification the user can tap to open NoteFlash, which then makes the cards.
-    private static func notify(title: String, several: Bool, itemID: UUID) async -> Bool {
+    private static func notify(title: String, several: Bool, isDeck: Bool, itemID: UUID) async -> Bool {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
             return false
         }
         let content = UNMutableNotificationContent()
-        content.title = "Ready to make flashcards"
-        content.body = several || title.isEmpty
-            ? "Tap to open NoteFlash and make your decks."
-            : "Tap to open NoteFlash and make “\(title)”."
+        content.title = isDeck ? "Ready to add these flashcards" : "Ready to make flashcards"
+        if isDeck {
+            content.body = title.isEmpty
+                ? "Tap to open NoteFlash and add the deck."
+                : "Tap to open NoteFlash and add “\(title)”."
+        } else {
+            content.body = several || title.isEmpty
+                ? "Tap to open NoteFlash and make your decks."
+                : "Tap to open NoteFlash and make “\(title)”."
+        }
         content.userInfo = ["sharedItemID": itemID.uuidString]
         let request = UNNotificationRequest(identifier: itemID.uuidString, content: content, trigger: nil)
         do {

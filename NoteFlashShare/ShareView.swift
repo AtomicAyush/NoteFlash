@@ -29,9 +29,13 @@ struct ShareView: View {
                 Label("Sent to NoteFlash", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             } description: {
-                Text(notified
-                    ? "Tap the notification to open NoteFlash. Your flashcards are made as soon as it opens."
-                    : "Open NoteFlash to make your flashcards. They're made as soon as it opens.")
+                Text(model.sharedDeck != nil
+                    ? (notified
+                        ? "Tap the notification to open NoteFlash, which asks whether to add the deck."
+                        : "Open NoteFlash to add the deck.")
+                    : (notified
+                        ? "Tap the notification to open NoteFlash. Your flashcards are made as soon as it opens."
+                        : "Open NoteFlash to make your flashcards. They're made as soon as it opens."))
             }
         case .ready, .saving:
             form
@@ -57,7 +61,12 @@ struct ShareView: View {
                 }
             }
 
-            if model.makesSeveralDecks {
+            if model.sharedDeck != nil {
+                Section {
+                    Label("These cards are added exactly as they were written, so this is instant and nothing is reworded. You can rename the deck when you add it.", systemImage: "square.and.arrow.down")
+                        .font(.subheadline)
+                }
+            } else if model.makesSeveralDecks {
                 Section {
                     Label("Each PDF or PowerPoint file becomes its own deck, and any images become one deck.", systemImage: "square.stack")
                         .font(.subheadline)
@@ -68,14 +77,16 @@ struct ShareView: View {
                 }
             }
 
-            Section {
-                Picker("Card Detail", selection: $model.density) {
-                    ForEach(ShareModel.densities, id: \.0) { value, label in
-                        Text(label).tag(value)
+            if model.sharedDeck == nil {
+                Section {
+                    Picker("Card Detail", selection: $model.density) {
+                        ForEach(ShareModel.densities, id: \.0) { value, label in
+                            Text(label).tag(value)
+                        }
                     }
+                } footer: {
+                    Text("NoteFlash makes the cards with the AI model chosen in its Settings. Handwriting in PDFs and images is read with on-device text recognition.")
                 }
-            } footer: {
-                Text("NoteFlash makes the cards with the AI model chosen in its Settings. Handwriting in PDFs and images is read with on-device text recognition.")
             }
         }
         .disabled(model.state == .saving)
@@ -97,7 +108,7 @@ struct ShareView: View {
                 Button("Cancel") { model.cancel() }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Make Cards") {
+                Button(model.sharedDeck == nil ? "Make Cards" : "Add Deck") {
                     Task { await model.save() }
                 }
                 .disabled(model.state != .ready)
