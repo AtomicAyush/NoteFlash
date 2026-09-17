@@ -4,7 +4,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
 
 ## Features
 
-- **Three ways to add notes:** type or paste text, import a PDF (scanned pages go through on-device text recognition), or link a Google Doc.
+- **Three ways to add notes:** type or paste text, import a PDF (scanned pages go through on-device text recognition), or add a Google Doc. You can pick the doc from a searchable list of your Drive or paste a link.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
 - **Google Doc sync:** linked docs are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect.
   - Cards you write or edit by hand are locked and never overwritten.
@@ -30,11 +30,14 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
 
 ### Google Docs setup (private docs, optional)
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Docs API**.
-2. Under **OAuth consent screen**, choose *External*, fill in the app name, and add your Google account as a **test user**.
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Docs API** and the **Google Drive API**.
+2. Under **Google Auth Platform → Branding / Audience**, choose *External*, fill in the app name, and add your Google account as a **test user**.
+   Under **Data Access**, add `…/auth/documents.readonly` and `…/auth/drive.metadata.readonly`.
 3. Under **Credentials**, create an **OAuth client ID** of type **iOS**, with bundle ID `com.ayushkansal.NoteFlash`.
 4. Paste the client ID (`…apps.googleusercontent.com`) into `AppConfig.googleClientID`.
-5. In the app, go to Settings and choose **Sign in with Google**. This option appears once a client ID is set. NoteFlash asks only for read-only Docs access.
+5. In the app, open the Google Doc tab and choose **Choose from Google Drive** (or go to Settings and choose **Sign in with Google**).
+   - NoteFlash asks for read-only access to your Docs and to your Drive file list (names and dates only), which it uses to show your Docs.
+   - If you signed in before the file-list permission was added, tap **Allow Access** when the picker asks.
 
 While the consent screen is in *Testing* mode, Google expires refresh tokens after 7 days, so you'll need to sign in again weekly. Publishing the app removes that limit.
 
@@ -45,7 +48,7 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 | Data model (SwiftData) | `NoteFlash/Models` |
 | AI engines (shared protocol, Apple, Claude) | `NoteFlash/Services/Engines` |
 | Line diffing and section splitting | `TextDiff.swift`, `NoteChunker.swift` |
-| Google sign-in (OAuth + PKCE, no SDK) and Docs reading | `GoogleAuth.swift`, `GoogleDocsClient.swift` |
+| Google sign-in (OAuth + PKCE, no SDK), Docs reading, Drive doc list | `GoogleAuth.swift`, `GoogleDocsClient.swift`, `GoogleDriveClient.swift` |
 | Sync, note edits, regeneration | `DocSyncService.swift` |
 | Screens and study modes | `NoteFlash/Views` |
 

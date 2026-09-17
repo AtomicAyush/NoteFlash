@@ -10,6 +10,7 @@ struct NewDeckView: View {
     @Environment(DocSyncService.self) private var sync
     @Environment(GoogleAuth.self) private var googleAuth
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
+    @Query private var decks: [Deck]
 
     @State private var kind: SourceKind = .text
     @State private var title = ""
@@ -18,6 +19,8 @@ struct NewDeckView: View {
     @State private var pdfName: String?
     @State private var pdfPageCount = 0
     @State private var docLink = ""
+    @State private var selectedDoc: DriveDoc?
+    @State private var isPickingDoc = false
     @State private var autoSync = true
     @State private var density: CardDensity = .balanced
     @State private var isImportingPDF = false
@@ -85,6 +88,12 @@ struct NewDeckView: View {
                 }
             }
             .fileImporter(isPresented: $isImportingPDF, allowedContentTypes: [.pdf], onCompletion: importPDF)
+            .sheet(isPresented: $isPickingDoc) {
+                GoogleDocPickerView(linkedDocIDs: Set(decks.compactMap(\.googleDocID))) { doc in
+                    selectedDoc = doc
+                    docLink = doc.editURL
+                }
+            }
             .overlay {
                 if isGenerating {
                     WorkingOverlay(
@@ -156,12 +165,29 @@ struct NewDeckView: View {
     @ViewBuilder
     private var googleDocSections: some View {
         Section {
-            TextField("https://docs.google.com/document/d/…", text: $docLink, axis: .vertical)
+            if googleAuth.isConfigured {
+                if let selectedDoc {
+                    selectedDocRow(selectedDoc)
+                } else {
+                    Button {
+                        isPickingDoc = true
+                    } label: {
+                        Label("Choose from Google Drive", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+            }
+            if selectedDoc == nil {
+                TextField(
+                    googleAuth.isConfigured ? "Or paste a doc link" : "https://docs.google.com/document/d/…",
+                    text: $docLink,
+                    axis: .vertical
+                )
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            PasteButton(payloadType: String.self) { strings in
-                docLink = strings.first ?? docLink
+                PasteButton(payloadType: String.self) { strings in
+                    docLink = strings.first ?? docLink
+                }
             }
             Toggle("Keep cards in sync with the doc", isOn: $autoSync)
         } header: {
@@ -170,24 +196,58 @@ struct NewDeckView: View {
             Text("When the doc changes, NoteFlash updates the affected cards and adds cards for new material. Cards you edit by hand are never overwritten.")
         }
 
-        Section {
-            DisclosureGroup("How to share a doc by link") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Open the doc in Google Docs and tap **Share**.", systemImage: "1.circle")
-                    Label("Under **General access**, choose **Anyone with the link** (Viewer is enough).", systemImage: "2.circle")
-                    Label("Tap **Copy link**, then tap **Paste** above.", systemImage: "3.circle")
+        if selectedDoc == nil {
+            Section {
+                DisclosureGroup("How to share a doc by link") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Open the doc in Google Docs and tap **Share**.", systemImage: "1.circle")
+                        Label("Under **General access**, choose **Anyone with the link** (Viewer is enough).", systemImage: "2.circle")
+                        Label("Tap **Copy link**, then tap **Paste** above.", systemImage: "3.circle")
+                    }
+                    .font(.subheadline)
+                    .padding(.vertical, 4)
                 }
-                .font(.subheadline)
-                .padding(.vertical, 4)
+            } footer: {
+                Text(googleAuth.isConfigured
+                    ? "Links work for docs shared as “Anyone with the link”, even without signing in. To use a private doc, choose it from Google Drive instead."
+                    : "NoteFlash reads docs shared as “Anyone with the link can view”. Anyone with the link can read the doc, so avoid sharing private information this way.")
             }
-        } footer: {
-            Text(googleAuth.isConfigured
-                ? "Docs shared by link work without signing in. Sign in below to use private docs instead."
-                : "NoteFlash reads docs shared as “Anyone with the link can view”. Anyone with the link can read the doc, so avoid sharing private information this way.")
         }
+    }
 
-        if googleAuth.isConfigured {
-            GoogleAccountSection()
+    private func selectedDocRow(_ doc: DriveDoc) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                isPickingDoc = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.text.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color(red: 0.26, green: 0.52, blue: 0.96))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(doc.name)
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        Text("Tap to choose a different doc")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                selectedDoc = nil
+                docLink = ""
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove doc")
         }
     }
 

@@ -104,9 +104,6 @@ struct WorkingOverlay: View {
 /// Sign-in controls for reading private Google Docs.
 struct GoogleAccountSection: View {
     @Environment(GoogleAuth.self) private var googleAuth
-    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
-    @State private var isSigningIn = false
-    @State private var errorMessage: String?
 
     var body: some View {
         Section {
@@ -115,37 +112,67 @@ struct GoogleAccountSection: View {
                     .foregroundStyle(.orange)
             } else if googleAuth.isSignedIn {
                 LabeledContent("Signed in", value: googleAuth.email ?? "Google account")
+                if !googleAuth.canListDocs {
+                    GoogleSignInButton(title: "Allow Access to Your Docs List", systemImage: "list.bullet.rectangle")
+                }
                 Button("Sign Out", role: .destructive) {
                     googleAuth.signOut()
                 }
             } else {
-                Button {
-                    signIn()
-                } label: {
-                    HStack {
-                        Label("Sign in with Google", systemImage: "person.crop.circle.badge.plus")
-                        if isSigningIn {
-                            Spacer()
-                            ProgressView()
-                        }
-                    }
-                }
-                .disabled(isSigningIn)
-            }
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                GoogleSignInButton()
             }
         } header: {
             Text("Google Account")
         } footer: {
             if googleAuth.isConfigured {
-                Text("Signing in lets NoteFlash read your private Google Docs (read-only). Docs shared as “Anyone with the link” work without signing in.")
+                Text("Signing in lets NoteFlash show your Google Docs and read the ones you choose (read-only). Docs shared as “Anyone with the link” work without signing in.")
             } else {
                 Text("Add your OAuth client ID in AppConfig.swift to read private docs (see README). Until then, share docs as “Anyone with the link can view”.")
             }
         }
+    }
+}
+
+/// Starts Google sign-in (or asks for missing permissions) and shows progress and errors.
+struct GoogleSignInButton: View {
+    var title = "Sign in with Google"
+    var systemImage = "person.crop.circle.badge.plus"
+    var prominent = false
+
+    @Environment(GoogleAuth.self) private var googleAuth
+    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
+    @State private var isSigningIn = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if prominent {
+                button.buttonStyle(.borderedProminent)
+            } else {
+                button
+            }
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: prominent ? .center : .leading)
+            }
+        }
+    }
+
+    private var button: some View {
+        Button {
+            signIn()
+        } label: {
+            HStack {
+                Label(title, systemImage: systemImage)
+                if isSigningIn {
+                    Spacer().frame(maxWidth: prominent ? 8 : .infinity)
+                    ProgressView()
+                }
+            }
+        }
+        .disabled(isSigningIn)
     }
 
     private func signIn() {

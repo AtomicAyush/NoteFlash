@@ -38,7 +38,7 @@ nonisolated enum GoogleDocsClient {
 
     static func documentID(from link: String) -> String? {
         let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let match = trimmed.firstMatch(of: #/\/document\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{20,})/#) {
+        if let match = trimmed.firstMatch(of: #/\/document\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,})/#) {
             return String(match.1)
         }
         // A bare document ID.

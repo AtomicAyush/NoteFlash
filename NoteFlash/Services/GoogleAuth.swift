@@ -5,7 +5,7 @@ import Observation
 import SwiftUI
 
 /// Google sign-in using OAuth 2.0 with PKCE (no Google SDK needed).
-/// Grants read-only access to the user's Google Docs.
+/// Grants read-only access to the user's Google Docs and their Drive file list.
 @Observable
 final class GoogleAuth {
     enum AuthError: LocalizedError {
@@ -33,6 +33,7 @@ final class GoogleAuth {
         var refreshToken: String?
         var expiresAt: Date
         var email: String?
+        var grantedScopes: [String]?
     }
 
     private struct TokenResponse: Decodable {
@@ -40,8 +41,10 @@ final class GoogleAuth {
         let expiresIn: Double
         let refreshToken: String?
         let idToken: String?
+        let scope: String?
 
         enum CodingKeys: String, CodingKey {
+            case scope
             case accessToken = "access_token"
             case expiresIn = "expires_in"
             case refreshToken = "refresh_token"
@@ -59,14 +62,25 @@ final class GoogleAuth {
         }
     }
 
-    static let scopes = "openid email https://www.googleapis.com/auth/documents.readonly"
+    enum Scope {
+        static let docs = "https://www.googleapis.com/auth/documents.readonly"
+        /// File names and dates only, used to list the user's Docs.
+        static let driveList = "https://www.googleapis.com/auth/drive.metadata.readonly"
+    }
+
+    static let scopes = ["openid", "email", Scope.docs, Scope.driveList].joined(separator: " ")
 
     private(set) var email: String?
     private(set) var isSignedIn = false
+    private(set) var grantedScopes: Set<String> = []
     private var tokens: StoredTokens?
     private var refreshTask: Task<String, Error>?
 
     var isConfigured: Bool { !AppConfig.googleClientID.isEmpty }
+
+    /// Whether the user allowed NoteFlash to list their Docs. Google lets people
+    /// decline individual permissions, and older sign-ins predate this one.
+    var canListDocs: Bool { isSignedIn && grantedScopes.contains(Scope.driveList) }
 
     init() {
         if let data = KeychainStore.data(for: .googleTokens),
@@ -93,7 +107,11 @@ final class GoogleAuth {
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "include_granted_scopes", value: "true"),
         ]
+        if let email {
+            components.queryItems?.append(URLQueryItem(name: "login_hint", value: email))
+        }
 
         let callbackURL: URL
         do {
@@ -121,11 +139,13 @@ final class GoogleAuth {
             "client_id": AppConfig.googleClientID,
             "redirect_uri": Self.redirectURI,
         ])
+        // Google only returns a refresh token on first consent, so keep the existing one.
         let stored = StoredTokens(
             accessToken: response.accessToken,
-            refreshToken: response.refreshToken,
+            refreshToken: response.refreshToken ?? tokens?.refreshToken,
             expiresAt: Date.now.addingTimeInterval(response.expiresIn),
-            email: response.idToken.flatMap(Self.email(fromIDToken:))
+            email: response.idToken.flatMap(Self.email(fromIDToken:)) ?? email,
+            grantedScopes: response.scope.map(Self.scopeList)
         )
         save(stored)
     }
@@ -170,6 +190,7 @@ final class GoogleAuth {
                 updated.accessToken = response.accessToken
                 updated.expiresAt = Date.now.addingTimeInterval(response.expiresIn)
                 if let newRefresh = response.refreshToken { updated.refreshToken = newRefresh }
+                if let scope = response.scope { updated.grantedScopes = Self.scopeList(scope) }
                 self.save(updated)
                 return response.accessToken
             } catch AuthError.failed(let reason) where reason.contains("invalid_grant") {
@@ -215,6 +236,7 @@ final class GoogleAuth {
         tokens = stored
         email = stored?.email
         isSignedIn = stored != nil
+        grantedScopes = Set(stored?.grantedScopes ?? [])
     }
 
     // MARK: Helpers
@@ -226,6 +248,10 @@ final class GoogleAuth {
     }
 
     private static var redirectURI: String { "\(redirectScheme):/oauth2redirect" }
+
+    private static func scopeList(_ scope: String) -> [String] {
+        scope.split(separator: " ").map(String.init)
+    }
 
     private static func email(fromIDToken token: String) -> String? {
         let parts = token.split(separator: ".")
