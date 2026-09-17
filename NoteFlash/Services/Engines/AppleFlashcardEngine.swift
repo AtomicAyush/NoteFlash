@@ -70,8 +70,11 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         case rateLimited
         case unsupportedLanguage
         case tooLong
+        case timedOut
+        case modelNotReady(String?)
         case noText
-        case generationFailed
+        /// The framework's own description is kept for the Processing Log.
+        case generationFailed(String?)
 
         var errorDescription: String? {
             switch self {
@@ -85,6 +88,14 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 "Apple Intelligence doesn't support the language of these notes yet. Try switching to Claude in Settings."
             case .tooLong:
                 "Part of these notes is too long for Apple Intelligence to read at once. Try adding line breaks or headings."
+            case .timedOut:
+                "Apple Intelligence took too long on these notes. Try again, or add headings to split them into smaller sections."
+            case .modelNotReady:
+                #if targetEnvironment(simulator)
+                "Apple Intelligence can't load its model in this Simulator. Try a real iPhone, or switch to Claude in Settings."
+                #else
+                "Apple Intelligence's model isn't ready on this iPhone. It may still be downloading after an update; keep the iPhone on Wi-Fi and power, then try again later. You can also switch to Claude in Settings."
+                #endif
             case .noText:
                 "There's no readable text in these notes."
             case .generationFailed:
@@ -285,20 +296,31 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
             }
             return SectionCards(title: sets.first?.title, cards: Array(cards.prefix(cap)))
-        } catch where AppleModelFailure(error) == .guardrail {
+        } catch where AppleModelFailure(error).allowsPlainTextRetry {
             var cards: [GeneratedCard] = []
+            var plainTextError: Error?
             for _ in 0..<2 where cards.count < Self.minimumCardCount(for: text, density: density) {
+                try Task.checkCancellation()
                 let found = cards.count
-                let extra = (try? await plainTextCards(
-                    for: text, request: request, instructions: instructions, cap: cap,
-                    onEvent: { event in
-                        if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
-                    }
-                )) ?? []
+                let extra: [GeneratedCard]
+                do {
+                    extra = try await plainTextCards(
+                        for: text, request: request, instructions: instructions, cap: cap,
+                        onEvent: { event in
+                            if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
+                        }
+                    )
+                } catch where AppleModelFailure(error) != .cancelled {
+                    plainTextError = error
+                    break
+                }
                 cards += Self.faithful(extra, to: text)
                     .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
             }
-            guard !cards.isEmpty else { throw error }
+            // A refusal is the more useful error; otherwise report why plain text failed too.
+            guard !cards.isEmpty else {
+                throw AppleModelFailure(error) == .guardrail ? error : (plainTextError ?? error)
+            }
             return SectionCards(title: nil, cards: Array(cards.prefix(cap)))
         }
     }
@@ -383,7 +405,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 for: text, request: request, instructions: instructions,
                 cap: cap, depth: depth, attempt: attempt + 1, onEvent: onEvent
             )
-        } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
+        } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             var cards: [GeneratedCard] = []
             for half in NoteChunker.halves(of: text) where half != text {
                 let found = cards.count
@@ -461,7 +483,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 // Stop a runaway response; the cards written so far are kept below.
                 if count > cap { break }
             }
-            guard sawSnapshot, let latest else { throw EngineError.generationFailed }
+            guard sawSnapshot, let latest else { throw EngineError.generationFailed("The model returned no output.") }
             // Build the result from the last snapshot rather than re-parsing the raw output.
             let cards = (latest.cards ?? []).prefix(cap).compactMap { partial -> AppleCard? in
                 guard let question = partial.question, let answer = partial.answer,
@@ -476,7 +498,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 for: text, request: request, cap: cap, depth: depth, attempt: attempt + 1,
                 onEvent: onEvent, makeSession: makeSession
             )
-        } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
+        } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             let halves = NoteChunker.halves(of: text)
             guard halves.count > 1 else { throw error }
             var sets: [AppleCardSet] = []
@@ -637,7 +659,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         let decisions: [ReviewDecision]
         do {
             decisions = try await Self.reviewDecisions(for: hunk, cards: related)
-        } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
+        } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             let pieces = hunk.split(maxCharacters: max(200, hunk.characterCount / 2))
             guard pieces.count > 1 else { throw error }
             for piece in pieces {
@@ -702,7 +724,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     back: decision.back
                 )
             }
-        } catch where AppleModelFailure(error) == .guardrail {
+        } catch where AppleModelFailure(error).allowsPlainTextRetry {
             let session = LanguageModelSession(
                 model: permissiveModel,
                 instructions: """
@@ -855,10 +877,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         case .rateLimited: EngineError.rateLimited
         case .unsupportedLanguage: EngineError.unsupportedLanguage
         case .contextExceeded: EngineError.tooLong
-        case .other:
-            // Keep the app's own errors; replace the framework's opaque ones.
-            error is CancellationError || error is EngineError || error is DeckCreator.CreationError
-                ? error : EngineError.generationFailed
+        case .timeout: EngineError.timedOut
+        case .assetsUnavailable: EngineError.modelNotReady(String(reflecting: error))
+        case .cancelled: error
+        case .structuredOutput, .other:
+            // Keep the app's own errors; replace the framework's opaque ones, keeping their details for the log.
+            error is EngineError || error is DeckCreator.CreationError
+                ? error : EngineError.generationFailed(String(reflecting: error))
         }
     }
 }
@@ -869,29 +894,79 @@ nonisolated enum AppleModelFailure: Equatable {
     case guardrail
     case rateLimited
     case unsupportedLanguage
+    /// The model's assets aren't on the device yet (downloading or updating).
+    case assetsUnavailable
+    /// The request took too long; a smaller request may finish.
+    case timeout
+    /// Guided generation couldn't produce or parse structured output.
+    case structuredOutput
+    case cancelled
     case other
 
     init(_ error: Error) {
+        if error is CancellationError {
+            self = .cancelled
+            return
+        }
         if let error = error as? LanguageModelSession.GenerationError {
             switch error {
             case .exceededContextWindowSize: self = .contextExceeded
             case .guardrailViolation, .refusal: self = .guardrail
             case .rateLimited, .concurrentRequests: self = .rateLimited
             case .unsupportedLanguageOrLocale: self = .unsupportedLanguage
+            case .assetsUnavailable: self = .assetsUnavailable
+            case .decodingFailure, .unsupportedGuide: self = .structuredOutput
             default: self = .other
             }
             return
         }
-        if #available(iOS 27.0, macOS 27.0, *), let error = error as? LanguageModelError {
-            switch error {
-            case .contextSizeExceeded: self = .contextExceeded
-            case .guardrailViolation, .refusal: self = .guardrail
-            case .rateLimited: self = .rateLimited
-            case .unsupportedLanguageOrLocale: self = .unsupportedLanguage
-            default: self = .other
+        if #available(iOS 27.0, macOS 27.0, *) {
+            if let error = error as? LanguageModelError {
+                switch error {
+                case .contextSizeExceeded: self = .contextExceeded
+                case .guardrailViolation, .refusal: self = .guardrail
+                case .rateLimited: self = .rateLimited
+                case .unsupportedLanguageOrLocale: self = .unsupportedLanguage
+                case .timeout: self = .timeout
+                case .unsupportedGenerationGuide: self = .structuredOutput
+                default: self = .other
+                }
+                return
             }
+            if let error = error as? LanguageModelSession.Error, error == .concurrentRequests {
+                self = .rateLimited
+                return
+            }
+            if error is SystemLanguageModel.Error {
+                self = .assetsUnavailable
+                return
+            }
+            if error is GeneratedContent.ParsingError {
+                self = .structuredOutput
+                return
+            }
+        }
+        if Self.involvesModelManager(error as NSError) {
+            self = .assetsUnavailable
             return
         }
         self = .other
+    }
+
+    /// Worth retrying as a plain-text request under the permissive guardrails.
+    var allowsPlainTextRetry: Bool {
+        switch self {
+        case .guardrail, .structuredOutput, .timeout, .other: true
+        default: false
+        }
+    }
+
+    /// Errors from the system's model manager mean the model itself couldn't be loaded.
+    private static func involvesModelManager(_ error: NSError, depth: Int = 0) -> Bool {
+        if error.domain.contains("ModelManager") { return true }
+        guard depth < 4 else { return false }
+        var underlying = error.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] ?? []
+        if let single = error.userInfo[NSUnderlyingErrorKey] as? NSError { underlying.append(single) }
+        return underlying.contains { involvesModelManager($0, depth: depth + 1) }
     }
 }

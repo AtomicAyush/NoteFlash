@@ -41,7 +41,7 @@ final class DiagnosticsLog {
     static func describe(_ error: Error) -> String {
         let nsError = error as NSError
         let reflected = String(reflecting: error)
-        let trimmed = reflected.count > 300 ? reflected.prefix(300) + "…" : Substring(reflected)
+        let trimmed = reflected.count > 600 ? reflected.prefix(600) + "…" : Substring(reflected)
         return "\(trimmed) [\(nsError.domain) \(nsError.code)]"
     }
 }

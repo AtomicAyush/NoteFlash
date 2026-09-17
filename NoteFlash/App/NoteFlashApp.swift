@@ -42,6 +42,11 @@ struct NoteFlashApp: App {
                 .environment(googleAuth)
                 .environment(syncService)
                 .environment(processing)
+                #if DEBUG
+                .task {
+                    if AppleIntelligenceCheck.isRequestedAtLaunch { await AppleIntelligenceCheck.run() }
+                }
+                #endif
         }
         .modelContainer(container)
         .onChange(of: scenePhase, initial: true) { _, phase in

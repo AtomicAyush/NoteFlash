@@ -18,7 +18,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
   - **If iOS stops background work:** the job pauses and picks up again when you open NoteFlash.
   - **When a job finishes in the background:** a notification lets you open the deck.
   - **Time estimates:** they learn how fast your device (or Claude) actually is.
-  - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy.
+  - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy. The log screen's **Check Apple Intelligence** button sends a few test requests to the on-device model and records the results.
 - **Deck tools:** stars, a "study starred only" filter, search, editing notes (text decks), regenerating a deck, and resetting progress.
 
 ## Requirements
@@ -64,6 +64,7 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Card format:** each card is generated fact → question → answer, which gives the small model better questions.
 - **Refused sections:** Apple's default safety filter often refuses ordinary history or health notes when it has to return structured output. Those sections are retried as plain-text Q/A under the permissive safety setting.
 - **Thin sections:** a section that yields fewer cards than expected gets a second pass.
+- **Other failures:** if structured output fails or times out, the section is split or retried as plain text. iOS 26 (`LanguageModelSession.GenerationError`) and iOS 27 (`LanguageModelError`, `LanguageModelSession.Error`, `SystemLanguageModel.Error`, `GeneratedContent.ParsingError`) errors are grouped by `AppleModelFailure`. A model that can't be loaded, such as while it's downloading after an iOS update, gets its own message.
 
 **Keeping cards in sync.**
 - **Detecting changes:** the app fingerprints the notes and diffs them line by line.
@@ -89,4 +90,5 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 
 - Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive for the doc picker.
 - The on-device model's behavior varies from run to run, so check prompt changes against several kinds of notes.
+- Launch with `-appleModelSelfTest` (Debug builds) to run the Apple Intelligence check at startup. The results go to `Documents/NoteFlash-processing-log.txt` in the app's data container. On a macOS 26 Mac, the iOS 27 Simulator can't load the on-device model, so every request fails with a model manager error.
 - `-uiTesting` also swaps in a slow sample engine, so processing progress can be checked in the Simulator. The Simulator can't run continued-processing tasks or Apple's on-device model, so try the Live Activity on a real iPhone.

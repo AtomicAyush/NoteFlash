@@ -3,9 +3,30 @@ import SwiftUI
 /// Recent processing events, newest first, for diagnosing failed jobs.
 struct ProcessingLogView: View {
     private var log = DiagnosticsLog.shared
+    @State private var isChecking = false
 
     var body: some View {
         List {
+            Section {
+                Button {
+                    Task {
+                        isChecking = true
+                        await AppleIntelligenceCheck.run()
+                        isChecking = false
+                    }
+                } label: {
+                    HStack {
+                        Label("Check Apple Intelligence", systemImage: "stethoscope")
+                        if isChecking {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(isChecking)
+            } footer: {
+                Text("Sends a few short test requests to the on-device model and adds the results below. Takes about a minute.")
+            }
             if log.entries.isEmpty {
                 ContentUnavailableView("No Events Yet", systemImage: "list.bullet.rectangle", description: Text("Events appear here when NoteFlash makes or updates flashcards."))
             } else {
