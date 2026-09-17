@@ -9,6 +9,12 @@ enum UITestSupport {
         ProcessInfo.processInfo.arguments.contains("-uiTesting")
     }
 
+    /// `-catchUpNow` runs a short background catch-up at launch, to check that saved work is
+    /// picked up and that stopping at the deadline keeps everything.
+    nonisolated static var runsCatchUpAtLaunch: Bool {
+        ProcessInfo.processInfo.arguments.contains("-catchUpNow")
+    }
+
     static func seed(_ context: ModelContext) {
         let deck = Deck(
             title: "Sample: Cell Biology",

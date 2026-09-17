@@ -167,20 +167,25 @@ nonisolated enum ModelLimits {
     }
 }
 
-/// Cards from sections that finished, so a retried or resumed job skips work already done
-/// (and doesn't spend more of the usage limit on it). Kept in memory for this app session.
+/// Cards from sections that finished, so a job that is retried, resumed, or picked up after
+/// iOS stopped the app skips work already done (and doesn't spend more of the usage limit on
+/// it). Kept in memory and on disk.
 nonisolated final class SectionCache: @unchecked Sendable {
-    struct Entry: Sendable {
+    struct Entry: Sendable, Codable {
         let title: String?
         let cards: [GeneratedCard]
     }
 
     static let shared = SectionCache()
     private static let maxEntries = 400
+    /// Finished sections are only useful to a job that's still in the queue.
+    private static let maxAge: TimeInterval = 3 * 24 * 60 * 60
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
     private var order: [String] = []
+    private let folder = AppGroupStore.folder(named: "FinishedSections")
+    private var hasPruned = false
 
     static func key(model: String, density: CardDensity, request: String, text: String) -> String {
         let material = [model, density.rawValue, request, text].joined(separator: "\u{1F}")
@@ -188,7 +193,18 @@ nonisolated final class SectionCache: @unchecked Sendable {
     }
 
     func entry(for key: String) -> Entry? {
-        lock.withLock { entries[key] }
+        if let entry = lock.withLock({ entries[key] }) { return entry }
+        guard let url = file(for: key), let data = try? Data(contentsOf: url),
+              let entry = try? JSONDecoder().decode(Entry.self, from: data) else { return nil }
+        keepInMemory(entry, for: key)
+        return entry
+    }
+
+    func store(_ entry: Entry, for key: String) {
+        keepInMemory(entry, for: key)
+        pruneOnce()
+        guard let url = file(for: key), let data = try? JSONEncoder().encode(entry) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 
     func removeAll() {
@@ -196,15 +212,40 @@ nonisolated final class SectionCache: @unchecked Sendable {
             entries = [:]
             order = []
         }
+        guard let folder else { return }
+        for file in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
-    func store(_ entry: Entry, for key: String) {
+    private func keepInMemory(_ entry: Entry, for key: String) {
         lock.withLock {
             if entries.updateValue(entry, forKey: key) == nil {
                 order.append(key)
             }
             while order.count > Self.maxEntries {
                 entries[order.removeFirst()] = nil
+            }
+        }
+    }
+
+    private func file(for key: String) -> URL? {
+        // The key is a hash, so it's already a safe file name.
+        folder?.appending(path: "\(key).json")
+    }
+
+    /// Drops sections left behind by jobs that finished or were given up on long ago.
+    private func pruneOnce() {
+        guard !lock.withLock({ hasPruned }) else { return }
+        lock.withLock { hasPruned = true }
+        guard let folder else { return }
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+        for file in files {
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if Date.now.timeIntervalSince(modified) > Self.maxAge {
+                try? FileManager.default.removeItem(at: file)
             }
         }
     }

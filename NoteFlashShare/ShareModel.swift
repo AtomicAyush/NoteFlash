@@ -1,3 +1,4 @@
+import BackgroundTasks
 import Foundation
 import Observation
 import PDFKit
@@ -328,6 +329,7 @@ final class ShareModel {
             state = .failed(error.localizedDescription)
             return
         }
+        Self.askForBackgroundTime()
         let notified = await Self.notify(title: deckTitle, several: makesSeveralDecks, itemID: draft.id)
         state = .saved(notified: notified)
         if notified {
@@ -343,6 +345,16 @@ final class ShareModel {
 
     func finish() {
         context?.completeRequest(returningItems: nil)
+    }
+
+    /// Asks iOS to start NoteFlash in the background to make the cards, so the user doesn't have
+    /// to open it. iOS decides when, and won't do it at all if NoteFlash was force-quit, so the
+    /// notification below stays as the way in.
+    private static func askForBackgroundTime() {
+        let request = BGProcessingTaskRequest(identifier: BackgroundWork.catchUpTaskID)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 10)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundWork.catchUpTaskID)
+        try? BGTaskScheduler.shared.submit(request)
     }
 
     /// A notification the user can tap to open NoteFlash, which then makes the cards.

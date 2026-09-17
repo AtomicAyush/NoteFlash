@@ -90,13 +90,13 @@ struct ProcessingJobRow: View {
                     : "at \(resumeAt.formatted(date: .omitted, time: .shortened))"
                 switch job.kind {
                 case .newDeck, .regenerate:
-                    Text("Apple Intelligence reached its usage limit for now. Finished sections are kept, and the rest continues \(when) while NoteFlash is open.")
+                    Text("Apple Intelligence reached its usage limit for now. Finished sections are kept, and the rest continues \(when), on its own if NoteFlash isn't open.")
                 case .updateNotes, .syncDoc:
-                    Text("Apple Intelligence reached its usage limit for now. The update runs again \(when) while NoteFlash is open.")
+                    Text("Apple Intelligence reached its usage limit for now. The update runs again \(when).")
                 }
             }
         } else {
-            Text("Paused while NoteFlash was in the background. It picks up again when you open the app.")
+            Text("iOS took back the background time. Finished sections are kept: this continues when iOS next lets NoteFlash work in the background, or as soon as you open the app.")
         }
     }
 

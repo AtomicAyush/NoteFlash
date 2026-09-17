@@ -32,7 +32,9 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Match:** a timed matching game with penalties for wrong matches and a best time.
 - **Background processing:** new decks, regenerated decks, note edits, and Google Drive updates all run as background jobs. The deck list shows each job's progress and time left.
   - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen.
-  - **If iOS stops background work:** the job pauses and picks up again when you open NoteFlash.
+  - **Nothing is lost:** unfinished work is written down, so closing NoteFlash — or iOS stopping it — doesn't throw it away. Sections that were already written are kept, and the job picks up from there.
+  - **If iOS stops background work:** NoteFlash asks iOS for more background time and carries on when it's granted, without you opening the app. Opening the app always starts it again right away.
+  - **Notes shared from another app:** NoteFlash asks iOS to start it in the background and make the cards, so the notification is a shortcut, not a requirement. (iOS runs this when the device is idle, and not at all if NoteFlash was force-quit from the app switcher.)
   - **When a job finishes in the background:** a notification lets you open the deck.
   - **Time estimates:** they learn how fast your device (or Claude) actually is.
   - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy. The log screen's **Check Apple Intelligence** button sends a few test requests to the on-device model and records the results.
@@ -114,7 +116,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 **Sharing from other apps.**
 - **Handoff:** a share extension can't open its app or run long jobs, so `NoteFlashShare` copies what was shared into an App Group folder (`group.com.ayushkansal.NoteFlash`). The item's manifest is written last, so the app never reads a half-written item.
 - **Notification:** the extension posts a notification that opens NoteFlash.
-- **Import:** each time the app becomes active, `SharedNotesImporter` starts a normal background job for each item and deletes it.
+- **Import:** `SharedNotesImporter` turns each item into a normal background job. This runs at launch, when the app becomes active, and during background runs, so shared notes don't wait for the app to be opened.
+- **Starting the app:** the extension also submits the app's catch-up background task. Extensions can't launch their app themselves, but iOS launches the containing app to run a task it submitted.
 - **Images:** turned into a PDF, one page per image, so they can be viewed, read with text recognition, and sent to Claude like any PDF.
 - **Page images (iOS 27):** when the on-device model can read images, handwritten and scanned pages go to Apple Intelligence as images, with the Vision text as a hint, so handwriting, math, and symbols are read in context. Runs of typed pages still use text. If a page image fails, that page falls back to its recognized text.
 - **Context for every section:** the document's title (unless it's a generic name like "Scan" or "IMG_1234") heads the notes, so every section knows the topic. When pages were read from handwriting, the model is told to expect misread words and symbols.
@@ -133,11 +136,20 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 **Background processing.** `ProcessingCenter` runs each job as an iOS continued-processing task (`BGContinuedProcessingTask`, iOS 26+).
 - **Live Activity:** the system shows it in the Dynamic Island and on the Lock Screen. The app updates its progress and subtitle ("About 40 sec left · Section 2 of 5").
 - **Heartbeat:** iOS may end continued-processing tasks whose progress stalls, so the reported progress moves forward every 2 seconds, even while the model is between updates.
-- **Fallback:** if iOS declines the request or later withdraws the time, the job keeps running in the app. If the app is in the background when the short grace period runs out, the job pauses and resumes the next time the app becomes active.
+- **Foreground only:** iOS grants continued-processing time only to the app someone is using, so it's requested only while NoteFlash is active. Work started in the background runs on the background task's own time instead.
+- **Fallback:** if iOS declines the request or later withdraws the time, the job keeps running in the app for the short grace period, then pauses with its progress saved.
+
+**Work that outlives the app.** Nothing in flight lives only in memory.
+- **Saved jobs:** `JobStore` keeps every unfinished job in the App Group: what to make, the files it needs (a shared PDF, photographed pages), how often it has been tried, and when it may continue. A job is deleted only once its cards exist.
+- **Saved sections:** `SectionCache` writes finished sections to disk as well as memory, so a job that stops halfway resumes from where it stopped instead of spending the usage limit again. They're kept for three days.
+- **Picking work up:** `restoreSavedJobs` runs at launch (not when a window appears — iOS also starts the app with no window), when the app becomes active, and during background runs. Jobs that can't succeed on a retry (notes NoteFlash can't read, a blocked or deleted deck, a sign-in that expired) aren't retried; the rest are, up to six times before waiting for **Retry**.
+- **Catch-up task:** a `BGProcessingTask` (`com.ayushkansal.NoteFlash.catchup`) asks iOS to start NoteFlash in the background to finish the queue. It's requested when the app goes to background with work left, when a job pauses, when continued-processing time is withdrawn, and by the share extension after notes are shared. iOS runs these when the device is idle, and never for an app that was force-quit from the app switcher.
+- **Handing time back:** when iOS expires the task, running jobs stop where they are, their state is saved, and another catch-up is requested. Background app refresh also spends its ~30 seconds on the queue; with sections saved, even that makes progress.
 - **Usage limits:** iOS limits how much Apple Intelligence work an app can do in a stretch, and long notes can reach that limit even while NoteFlash is open. `ModelLimits` handles it:
   - **Short limits:** it waits until the reset time iOS reports (iOS 27), or backs off from 5 seconds to 2 minutes. The job shows when it will continue.
   - **Long limits:** if the wait would be longer than 4 minutes, the job pauses. It resumes on its own at the reset time while the app is open, and a notification says when it can continue.
-  - **No repeated work:** finished sections are kept in memory (`SectionCache`), so a resumed or retried job skips them. Optional extra passes are skipped for 15 minutes after a limit.
+  - **No repeated work:** finished sections are kept (`SectionCache`), so a resumed or retried job skips them. Optional extra passes are skipped for 15 minutes after a limit.
+  - **In the background:** Apple Intelligence rate-limits apps that aren't in the foreground, so background runs get through less before pausing. Each run still adds finished sections, and the job continues on the next one.
   - **Shorter responses:** each request caps its response length, so a model that starts repeating itself stops early.
 - **Stalls:** the model service sometimes stops mid-response for a minute or more. Responses are consumed on a separate task and watched. A response with no output for 20 seconds (45 before the first output) is cancelled and retried, up to twice. If it already wrote a good share of the section's cards, those are kept instead. Non-streaming requests get the same timeout.
 - **Diagnostics:** `DiagnosticsLog` records job events and full error descriptions to the system log (subsystem `com.ayushkansal.NoteFlash`) and to `Documents/NoteFlash-processing-log.txt`.

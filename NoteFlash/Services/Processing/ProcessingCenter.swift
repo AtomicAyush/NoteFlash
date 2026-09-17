@@ -23,7 +23,7 @@ final class ProcessingJob: Identifiable {
         case failed(String)
     }
 
-    let id = UUID()
+    fileprivate(set) var id = UUID()
     let kind: Kind
     let title: String
     fileprivate(set) var state: State = .running
@@ -47,10 +47,26 @@ final class ProcessingJob: Identifiable {
     fileprivate var pausing = false
     fileprivate var lastSystemSubtitle = ""
     fileprivate let startedAt = Date.now
+    /// How many times this job has been started, across app launches.
+    fileprivate var attempts = 0
+    /// What was written down for this job, so its files are only stored once.
+    fileprivate var savedWork: JobStore.Record.Work?
 
     init(kind: Kind, title: String) {
         self.kind = kind
         self.title = title
+    }
+
+    /// Rebuilds a job that was written down before the app stopped.
+    convenience init?(_ record: JobStore.Record) {
+        guard let kind = ProcessingCenter.kind(of: record) else { return nil }
+        self.init(kind: kind, title: record.title)
+        id = record.id
+        savedWork = record.work
+        attempts = record.attempts
+        resumeAt = record.resumeAt
+        errorDetail = record.lastError
+        state = .paused
     }
 
     var isRunning: Bool { state == .running }
@@ -174,36 +190,171 @@ final class ProcessingCenter {
         guard !job.isRunning else { return }
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.resumeNotificationID(job)])
         jobs.removeAll { $0.id == job.id }
+        JobStore.remove(job.id)
     }
 
     func retry(_ job: ProcessingJob) {
-        dismiss(job)
+        jobs.removeAll { $0.id == job.id }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.resumeNotificationID(job)])
         // Sections that already finished are reused, so this picks up where the job stopped.
-        launch(ProcessingJob(kind: job.kind, title: job.title))
+        job.attempts = 0
+        job.errorDetail = nil
+        launch(job)
     }
 
     /// Resumes jobs that paused while the app was in the background (or whose usage-limit wait
     /// is over), and starts decks for notes shared from other apps.
     func appDidBecomeActive() {
-        SharedNotesImporter.importPending(into: self)
-        resumeReadyJobs()
+        restoreSavedJobs()
     }
 
     private func resumeReadyJobs() {
         for job in jobs where job.state == .paused && (job.resumeAt ?? .distantPast) <= .now {
+            guard job.attempts < Self.maxAttempts else {
+                log.record("Not resuming \(job.title) on its own after \(job.attempts) tries")
+                continue
+            }
             log.record("Resuming: \(job.title)")
-            retry(job)
+            resume(job)
         }
+    }
+
+    /// Starts a job again, keeping its place in the list and its saved record.
+    private func resume(_ job: ProcessingJob) {
+        jobs.removeAll { $0.id == job.id }
+        launch(job)
     }
 
     private func launch(_ job: ProcessingJob) {
         jobs.insert(job, at: 0)
+        job.attempts += 1
+        job.state = .running
+        job.resumeAt = nil
+        write(job)
         log.record("Started \(job.activityLabel.lowercased()): \(job.title)")
         requestNotificationPermissionIfNeeded()
-        if !submitSystemTask(for: job) {
+        // iOS only grants continued-processing time to an app the user is looking at. In the
+        // background the job runs on whatever time the background task already holds.
+        if UIApplication.shared.applicationState == .active, submitSystemTask(for: job) {
+            // Waiting for iOS to start the task.
+        } else {
             runInApp(job)
         }
         startTicker()
+    }
+
+    // MARK: Work that outlives the app
+
+    /// How many times a job is started on its own before it waits for the user to tap Retry.
+    private static let maxAttempts = 6
+
+    /// Picks up jobs written down before the app was closed or stopped by iOS, and starts the
+    /// ones that are ready. Safe to call whenever the app runs, including a background launch.
+    func restoreSavedJobs() {
+        JobStore.removeAbandoned()
+        SharedNotesImporter.importPending(into: self)
+        for record in JobStore.records() where !jobs.contains(where: { $0.id == record.id }) {
+            guard let job = ProcessingJob(record) else {
+                log.record("Dropped a saved job that can't be read")
+                JobStore.remove(record.id)
+                continue
+            }
+            log.record("Found unfinished work: \(job.title)")
+            jobs.append(job)
+        }
+        resumeReadyJobs()
+    }
+
+    /// Work waiting to be done, whether or not it's running right now.
+    var hasUnfinishedWork: Bool {
+        jobs.contains { $0.isRunning || $0.state == .paused } || !JobStore.records().isEmpty
+    }
+
+    /// Saves the job so it can be picked up again if the app stops. Sync jobs aren't saved:
+    /// they're worked out from the linked file again anyway.
+    private func write(_ job: ProcessingJob) {
+        guard let work = job.savedWork ?? Self.work(of: job) else { return }
+        job.savedWork = work
+        JobStore.save(
+            JobStore.Record(
+                id: job.id,
+                title: job.title,
+                work: work,
+                resumeAt: job.resumeAt,
+                attempts: job.attempts,
+                lastError: job.errorDetail
+            )
+        )
+    }
+
+    private static func work(of job: ProcessingJob) -> JobStore.Record.Work? {
+        switch job.kind {
+        case .newDeck(let source, let density):
+            switch source {
+            case .text(let title, let notes):
+                return .newDeckText(title: title, notes: notes, density: density.rawValue)
+            case .file(let fileName, let data, let title):
+                guard let file = JobStore.addFile(data, named: fileName, for: job.id) else { return nil }
+                return .newDeckFile(fileName: fileName, file: file, title: title, density: density.rawValue)
+            case .images(let name, let data, let title):
+                let files = data.enumerated().compactMap {
+                    JobStore.addFile($1, named: "Page \($0 + 1).jpg", for: job.id)
+                }
+                guard files.count == data.count else { return nil }
+                return .newDeckImages(name: name, files: files, title: title, density: density.rawValue)
+            case .drive(let reference, let autoSync):
+                return .newDeckDrive(
+                    id: reference.id, kind: reference.kind?.rawValue, name: reference.name,
+                    autoSync: autoSync, density: density.rawValue
+                )
+            }
+        case .regenerate(let deckID):
+            return .regenerate(deckID: deckID)
+        case .updateNotes(let deckID, let text):
+            return .updateNotes(deckID: deckID, text: text)
+        case .syncDoc:
+            return nil
+        }
+    }
+
+    /// Whether starting this job again later could work. Notes the app can't use, and anything
+    /// waiting on the user, won't get better on their own.
+    private static func isWorthRetrying(_ error: Error) -> Bool {
+        switch error {
+        case is DeckCreator.CreationError, is DocSyncService.SyncError:
+            false
+        case let error as AppleFlashcardEngine.EngineError:
+            switch error {
+            case .blockedBySafetyFilter, .unsupportedLanguage, .noText, .unavailable: false
+            default: true
+            }
+        case let error as GoogleDriveClient.DriveError:
+            ![.unauthorized, .missingPermission, .apiDisabled, .notFound].contains(error)
+        default:
+            true
+        }
+    }
+
+    fileprivate static func kind(of record: JobStore.Record) -> ProcessingJob.Kind? {
+        func density(_ raw: String) -> CardDensity { CardDensity(rawValue: raw) ?? .balanced }
+        switch record.work {
+        case .newDeckText(let title, let notes, let raw):
+            return .newDeck(.text(title: title, notes: notes), density(raw))
+        case .newDeckFile(let fileName, let file, let title, let raw):
+            guard let data = JobStore.file(file, for: record.id) else { return nil }
+            return .newDeck(.file(fileName: fileName, data: data, title: title), density(raw))
+        case .newDeckImages(let name, let files, let title, let raw):
+            let data = files.compactMap { JobStore.file($0, for: record.id) }
+            guard data.count == files.count, !data.isEmpty else { return nil }
+            return .newDeck(.images(name: name, data: data, title: title), density(raw))
+        case .newDeckDrive(let id, let kind, let name, let autoSync, let raw):
+            let reference = DriveFileReference(id: id, kind: kind.flatMap(DriveFileKind.init(rawValue:)), name: name)
+            return .newDeck(.drive(reference, autoSync: autoSync), density(raw))
+        case .regenerate(let deckID):
+            return .regenerate(deckID: deckID)
+        case .updateNotes(let deckID, let text):
+            return .updateNotes(deckID: deckID, text: text)
+        }
     }
 
     // MARK: Background time
@@ -281,6 +432,9 @@ final class ProcessingCenter {
         job.systemTask = nil
         job.continuesInBackground = false
         beginAppBackgroundTask(for: job)
+        // If the short grace period isn't enough, the job pauses; this gets it going again
+        // without the user having to open NoteFlash.
+        scheduleCatchUp()
     }
 
     private func runInApp(_ job: ProcessingJob) {
@@ -313,6 +467,92 @@ final class ProcessingCenter {
         log.record("Background time ran out; pausing \(job.title)")
         job.pausing = true
         job.task?.cancel()
+    }
+
+    // MARK: Catching up in the background
+
+    /// Longest a catch-up run keeps going before handing the time back.
+    private static let catchUpLimit: TimeInterval = 25 * 60
+    private var catchUp: Task<Void, Never>?
+    private var lastCatchUpRequest = Date.distantPast
+
+    /// Asks iOS to start NoteFlash in the background later to finish what's left. iOS runs these
+    /// when the device is idle, and not at all if the app was force-quit from the app switcher.
+    func scheduleCatchUp(after date: Date? = nil) {
+        guard hasUnfinishedWork else { return }
+        // Several jobs stopping at once shouldn't each ask for the same time.
+        guard date != nil || Date.now.timeIntervalSince(lastCatchUpRequest) > 5 else { return }
+        lastCatchUpRequest = .now
+        let request = BGProcessingTaskRequest(identifier: BackgroundWork.catchUpTaskID)
+        request.earliestBeginDate = date ?? Date(timeIntervalSinceNow: 30)
+        request.requiresExternalPower = false
+        // Only linked Google Drive files need the network.
+        request.requiresNetworkConnectivity = JobStore.records().contains { record in
+            if case .newDeckDrive = record.work { return true }
+            return false
+        }
+        // Only one request per identifier is kept, so replace any earlier one.
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundWork.catchUpTaskID)
+        log.record("Asking iOS for background time to finish the queue")
+        submit(request, describing: "Background time")
+    }
+
+    /// Submits a request and logs anything iOS says about it. `submit(_:)` can't report some
+    /// refusals, so iOS 27's reporting version is used where it exists.
+    private func submit(_ request: BGTaskRequest, describing what: String) {
+        if #available(iOS 27.0, *) {
+            BGTaskScheduler.shared.submitTaskRequest(request) { error in
+                guard let error else { return }
+                Task { @MainActor in
+                    DiagnosticsLog.shared.record("\(what) refused: \(DiagnosticsLog.describe(error))")
+                }
+            }
+        } else {
+            do {
+                try BGTaskScheduler.shared.submit(request)
+            } catch {
+                log.record("\(what) refused: \(DiagnosticsLog.describe(error))")
+            }
+        }
+    }
+
+    /// Runs the saved jobs iOS gave us time for. Returns when the work is done, the deadline
+    /// passes, or iOS takes the time back.
+    func catchUp(until deadline: Date) async {
+        restoreSavedJobs()
+        guard jobs.contains(where: \.isRunning) else { return }
+        log.record("Working in the background (app \(Self.appStateName))")
+        while jobs.contains(where: \.isRunning), Date.now < deadline, !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(1))
+        }
+        if jobs.contains(where: \.isRunning) {
+            log.record("Out of background time; saving progress")
+            stopForNow()
+        }
+    }
+
+    /// iOS is taking the time back. Jobs stop where they are; finished sections are already
+    /// saved, so the next run picks up from there instead of starting over.
+    func stopForNow() {
+        for job in jobs where job.isRunning {
+            job.pausing = true
+            job.state = .paused
+            write(job)
+            job.task?.cancel()
+        }
+        catchUp?.cancel()
+        scheduleCatchUp()
+    }
+
+    /// Handles the background task iOS started for unfinished work.
+    func handle(_ task: BGProcessingTask) {
+        task.expirationHandler = { [weak self] in
+            Task { @MainActor in self?.stopForNow() }
+        }
+        catchUp = Task { @MainActor [weak self] in
+            await self?.catchUp(until: .now.addingTimeInterval(Self.catchUpLimit))
+            task.setTaskCompleted(success: true)
+        }
     }
 
     private static var appStateName: String {
@@ -406,6 +646,7 @@ final class ProcessingCenter {
         job.estimator?.recordCompletion(excluding: job.waitedSeconds + waiting)
         job.reportedFraction = 1
         job.state = .finished(deckID: deckID, summary: summary)
+        JobStore.remove(job.id)
         log.record("Finished in \(Int(Date.now.timeIntervalSince(job.startedAt)))s: \(job.title) (\(summary))")
         endBackgroundWork(for: job, success: true)
         switch job.kind {
@@ -422,11 +663,9 @@ final class ProcessingCenter {
         if job.pausing {
             log.record("Paused: \(job.title) (\(DiagnosticsLog.describe(error)))")
             job.state = .paused
-            notifyIfInBackground(
-                title: "“\(job.title)” is paused",
-                body: "Open NoteFlash to finish it.",
-                deckID: nil
-            )
+            job.pausing = false
+            write(job)
+            scheduleCatchUp()
             return
         }
         if case .rateLimited(let resumeAt, let detail)? = error as? AppleFlashcardEngine.EngineError {
@@ -436,12 +675,21 @@ final class ProcessingCenter {
         if wasCancelled {
             log.record("Cancelled: \(job.title)")
             jobs.removeAll { $0.id == job.id }
+            JobStore.remove(job.id)
             return
         }
         let detail = DiagnosticsLog.describe(error)
         log.record("Failed: \(job.title) — \(detail)")
         job.errorDetail = detail
         job.state = .failed(error.localizedDescription)
+        // Kept so it can be tried again later, unless it's a job that can't succeed on a retry.
+        if Self.isWorthRetrying(error) && job.attempts < Self.maxAttempts {
+            job.state = .paused
+            write(job)
+            scheduleCatchUp()
+        } else {
+            JobStore.remove(job.id)
+        }
         notifyIfInBackground(title: "Couldn't finish “\(job.title)”", body: error.localizedDescription, deckID: nil)
     }
 
@@ -453,6 +701,8 @@ final class ProcessingCenter {
         job.resumeAt = resumeAt
         job.waitingUntil = nil
         job.errorDetail = detail
+        write(job)
+        scheduleCatchUp(after: resumeAt)
         startTicker()
 
         // A reminder to open NoteFlash when the job can continue.
@@ -625,6 +875,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Registered at launch, so iOS can start NoteFlash in the background to finish work the
+        // app didn't get through — including notes shared while it was closed.
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: BackgroundWork.catchUpTaskID, using: .main) { task in
+            MainActor.assumeIsolated {
+                DiagnosticsLog.shared.record("iOS started NoteFlash to finish unfinished work")
+                guard let task = task as? BGProcessingTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                AppServices.shared.processing.handle(task)
+            }
+        }
         return true
     }
 

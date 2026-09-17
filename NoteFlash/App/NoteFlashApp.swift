@@ -11,29 +11,11 @@ struct NoteFlashApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        let container: ModelContainer
-        do {
-            #if DEBUG
-            let inMemory = UITestSupport.isEnabled
-            #else
-            let inMemory = false
-            #endif
-            container = try ModelContainer(
-                for: Deck.self, Flashcard.self,
-                configurations: ModelConfiguration(isStoredInMemoryOnly: inMemory)
-            )
-        } catch {
-            fatalError("Could not open the NoteFlash database: \(error)")
-        }
-        #if DEBUG
-        if UITestSupport.isEnabled { UITestSupport.seed(container.mainContext) }
-        #endif
-        let auth = GoogleAuth()
-        let sync = DocSyncService(container: container, googleAuth: auth)
-        self.container = container
-        _googleAuth = State(initialValue: auth)
-        _syncService = State(initialValue: sync)
-        _processing = State(initialValue: ProcessingCenter(container: container, sync: sync))
+        let services = AppServices.shared
+        container = services.container
+        _googleAuth = State(initialValue: services.googleAuth)
+        _syncService = State(initialValue: services.sync)
+        _processing = State(initialValue: services.processing)
     }
 
     var body: some Scene {
@@ -48,6 +30,9 @@ struct NoteFlashApp: App {
                 #if DEBUG
                 .task {
                     if AppleIntelligenceCheck.isRequestedAtLaunch { await AppleIntelligenceCheck.run() }
+                    if UITestSupport.runsCatchUpAtLaunch {
+                        await processing.catchUp(until: .now.addingTimeInterval(8))
+                    }
                 }
                 #endif
         }
@@ -60,12 +45,16 @@ struct NoteFlashApp: App {
             case .background:
                 syncService.stopForegroundPolling()
                 DocSyncService.scheduleBackgroundRefresh()
+                // Ask iOS for time to finish anything still being written.
+                processing.scheduleCatchUp()
             default:
                 break
             }
         }
-        .backgroundTask(.appRefresh(AppConfig.backgroundRefreshTaskID)) { [syncService] in
+        .backgroundTask(.appRefresh(AppConfig.backgroundRefreshTaskID)) { [syncService, processing] in
             await syncService.handleBackgroundRefresh()
+            // A refresh is short, but finished sections are kept, so every one makes progress.
+            await processing.catchUp(until: .now.addingTimeInterval(20))
         }
     }
 }

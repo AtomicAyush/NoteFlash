@@ -4,6 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
+		<string>com.ayushkansal.NoteFlash.catchup</string>
 		<string>com.ayushkansal.NoteFlash.docsync</string>
 		<string>com.ayushkansal.NoteFlash.processing.*</string>
 	</array>
