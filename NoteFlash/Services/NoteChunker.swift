@@ -139,6 +139,21 @@ nonisolated enum CardMatcher {
         return !answerWords.isEmpty && answerWords.isDisjoint(with: noteWords)
     }
 
+    /// True when a card clearly came from deleted lines and no remaining line covers it as well:
+    /// its best match among the removed lines shares at least two more key words than its best
+    /// match among the lines still in the notes.
+    static func isSourcedFromRemovedText(
+        _ card: ExistingCard,
+        removedLines: [Set<String>],
+        noteLines: [Set<String>]
+    ) -> Bool {
+        let cardWords = keywords(in: card.front + " " + card.back)
+        let fromRemoved = removedLines.lazy.map { $0.intersection(cardWords).count }.max() ?? 0
+        guard fromRemoved >= 3 else { return false }
+        let fromNotes = noteLines.lazy.map { $0.intersection(cardWords).count }.max() ?? 0
+        return fromRemoved >= fromNotes + 2
+    }
+
     /// True when two cards test essentially the same material.
     static func isNearDuplicate(_ a: GeneratedCard, of b: GeneratedCard) -> Bool {
         let wordsA = keywords(in: a.front + " " + a.back)

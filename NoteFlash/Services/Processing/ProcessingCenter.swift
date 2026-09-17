@@ -5,17 +5,21 @@ import SwiftData
 import UIKit
 import UserNotifications
 
-/// One deck being written (or rewritten) by the AI engine.
+/// One deck being written, rewritten, or updated by the AI engine.
 @Observable
 final class ProcessingJob: Identifiable {
     enum Kind {
         case newDeck(NewDeckSource, CardDensity)
         case regenerate(deckID: UUID)
+        case updateNotes(deckID: UUID, text: String)
+        case syncDoc(deckID: UUID, text: String)
     }
 
     enum State: Equatable {
         case running
-        case finished(deckID: UUID, cardCount: Int)
+        case finished(deckID: UUID, summary: String)
+        /// Stopped because iOS ended background time; resumes when the app is opened.
+        case paused
         case failed(String)
     }
 
@@ -26,14 +30,17 @@ final class ProcessingJob: Identifiable {
     fileprivate(set) var phase = "Getting ready"
     fileprivate(set) var reportedFraction = 0.0
     fileprivate(set) var estimator: ProcessingEstimator?
-    /// True when iOS agreed to keep the job running after the user leaves the app.
+    fileprivate(set) var errorDetail: String?
+    /// True while iOS is letting the job keep running after the user leaves the app.
     fileprivate(set) var continuesInBackground = false
 
     fileprivate var task: Task<Void, Never>?
     fileprivate var systemTask: BGContinuedProcessingTask?
+    fileprivate var systemUnits: Int64 = 0
     fileprivate var appBackgroundTask: UIBackgroundTaskIdentifier = .invalid
-    fileprivate var expired = false
+    fileprivate var pausing = false
     fileprivate var lastSystemSubtitle = ""
+    fileprivate let startedAt = Date.now
 
     init(kind: Kind, title: String) {
         self.kind = kind
@@ -44,9 +51,20 @@ final class ProcessingJob: Identifiable {
 
     /// The deck this job is about, once known.
     var deckID: UUID? {
-        if case .finished(let deckID, _) = state { return deckID }
-        if case .regenerate(let deckID) = kind { return deckID }
-        return nil
+        switch (kind, state) {
+        case (_, .finished(let deckID, _)): deckID
+        case (.regenerate(let deckID), _), (.updateNotes(let deckID, _), _), (.syncDoc(let deckID, _), _): deckID
+        case (.newDeck, _): nil
+        }
+    }
+
+    /// Section title for this kind of work.
+    var activityLabel: String {
+        switch kind {
+        case .newDeck: "Making Flashcards"
+        case .regenerate: "Rewriting Cards"
+        case .updateNotes, .syncDoc: "Updating Cards"
+        }
     }
 
     /// Progress to show, or nil while the job is still preparing (fetching, reading a PDF).
@@ -66,27 +84,43 @@ final class ProcessingJob: Identifiable {
 }
 
 /// Runs deck-writing jobs so the user can keep using the app (or leave it) while they finish.
-/// Jobs run as iOS continued-processing tasks, which the system shows as a Live Activity in the
-/// Dynamic Island and on the Lock Screen; if iOS declines, the job runs while the app is open.
+///
+/// Each job asks iOS for a continued-processing task, which keeps it running after the user
+/// leaves the app and shows a system Live Activity (Dynamic Island and Lock Screen). If iOS
+/// declines or later withdraws that time, the job keeps running while the app is open; if the
+/// app is in the background then, the job pauses and resumes when the app is opened again.
 @Observable
 final class ProcessingCenter {
     private(set) var jobs: [ProcessingJob] = []
 
     private let container: ModelContainer
     private let sync: DocSyncService
+    private let log = DiagnosticsLog.shared
     private var ticker: Task<Void, Never>?
     private var askedForNotifications = false
 
     private static let taskIdentifierPrefix = "com.ayushkansal.NoteFlash.processing."
+    private static let systemUnitCount: Int64 = 10_000
 
     init(container: ModelContainer, sync: DocSyncService) {
         self.container = container
         self.sync = sync
+        sync.onDocChanged = { [weak self] deck, document in
+            self?.updateFromDoc(deck, text: document.text)
+        }
     }
 
     /// A running job for this deck, if any.
     func runningJob(forDeck deckID: UUID) -> ProcessingJob? {
         jobs.first { $0.isRunning && $0.deckID == deckID }
+    }
+
+    /// The newest job for this deck that is still running or needs attention.
+    func unfinishedJob(forDeck deckID: UUID) -> ProcessingJob? {
+        jobs.first { job in
+            if case .finished = job.state { return false }
+            return job.deckID == deckID
+        }
     }
 
     // MARK: Starting and stopping
@@ -100,7 +134,32 @@ final class ProcessingCenter {
         launch(ProcessingJob(kind: .regenerate(deckID: deck.id), title: deck.title))
     }
 
+    func updateNotes(of deck: Deck, to text: String) {
+        guard runningJob(forDeck: deck.id) == nil else { return }
+        launch(ProcessingJob(kind: .updateNotes(deckID: deck.id, text: text), title: deck.title))
+    }
+
+    private func updateFromDoc(_ deck: Deck, text: String) {
+        guard runningJob(forDeck: deck.id) == nil else { return }
+        let earlier = jobs.filter { job in
+            if case .syncDoc(let deckID, _) = job.kind { return deckID == deck.id }
+            return false
+        }
+        // Don't retry the same doc text over and over; the failed row has a Retry button.
+        if earlier.contains(where: { job in
+            if case .syncDoc(_, let earlierText) = job.kind, case .failed = job.state { return earlierText == text }
+            return false
+        }) {
+            return
+        }
+        // A newer version of the doc replaces an earlier failed or paused attempt.
+        let replaced = Set(earlier.map(\.id))
+        jobs.removeAll { replaced.contains($0.id) }
+        launch(ProcessingJob(kind: .syncDoc(deckID: deck.id, text: text), title: deck.title))
+    }
+
     func cancel(_ job: ProcessingJob) {
+        log.record("Cancel requested: \(job.title)")
         job.task?.cancel()
     }
 
@@ -114,8 +173,17 @@ final class ProcessingCenter {
         launch(ProcessingJob(kind: job.kind, title: job.title))
     }
 
+    /// Resumes jobs that paused while the app was in the background.
+    func appDidBecomeActive() {
+        for job in jobs where job.state == .paused {
+            log.record("Resuming: \(job.title)")
+            retry(job)
+        }
+    }
+
     private func launch(_ job: ProcessingJob) {
         jobs.insert(job, at: 0)
+        log.record("Started \(job.activityLabel.lowercased()): \(job.title)")
         requestNotificationPermissionIfNeeded()
         if !submitSystemTask(for: job) {
             runInApp(job)
@@ -123,7 +191,7 @@ final class ProcessingCenter {
         startTicker()
     }
 
-    // MARK: Background execution
+    // MARK: Background time
 
     /// Asks iOS to run the job as a continued-processing task, which keeps it going in the
     /// background and shows the system's progress Live Activity.
@@ -138,26 +206,30 @@ final class ProcessingCenter {
             }
             self.attach(task, to: job)
         }
-        guard registered else { return false }
+        guard registered else {
+            log.record("Background task not registered (check BGTaskSchedulerPermittedIdentifiers)")
+            return false
+        }
 
         let request = BGContinuedProcessingTaskRequest(
             identifier: identifier,
-            title: "Making flashcards",
+            title: job.activityLabel.capitalizedFirstWordOnly,
             subtitle: job.title
         )
         request.strategy = .fail
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
+            log.record("Background task refused: \(DiagnosticsLog.describe(error))")
             return false
         }
-        job.continuesInBackground = true
+        log.record("Background task accepted")
 
-        // If iOS accepted the request but never starts it, run the job in the app instead.
+        // If iOS accepted the request but doesn't start it promptly, run the job in the app.
         Task { [weak self, weak job] in
             try? await Task.sleep(for: .seconds(3))
             guard let self, let job, job.isRunning, job.task == nil else { return }
-            job.continuesInBackground = false
+            self.log.record("Background task didn't start; running in the app")
             self.runInApp(job)
         }
         return true
@@ -168,11 +240,14 @@ final class ProcessingCenter {
             task.setTaskCompleted(success: false)
             return
         }
+        log.record("Background task started")
         job.systemTask = task
-        task.progress.totalUnitCount = 100
+        job.continuesInBackground = true
+        job.systemUnits = 0
+        task.progress.totalUnitCount = Self.systemUnitCount
         task.expirationHandler = { @Sendable [self, job] in
             Task { @MainActor in
-                self.expire(job)
+                self.systemTaskExpired(job)
             }
         }
         if job.task == nil {
@@ -181,19 +256,57 @@ final class ProcessingCenter {
         pushSystemProgress(for: job, force: true)
     }
 
-    /// Runs while the app is open, plus the short grace period iOS allows after leaving it.
-    private func runInApp(_ job: ProcessingJob) {
-        job.appBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Making flashcards") { [weak self, weak job] in
-            guard let self, let job else { return }
-            self.expire(job)
-        }
-        run(job)
+    /// iOS withdrew the continued-processing time. That only ends background time:
+    /// the job keeps running in the app, with the usual grace period if the app isn't open.
+    private func systemTaskExpired(_ job: ProcessingJob) {
+        guard job.isRunning, let task = job.systemTask else { return }
+        log.record("Background task expired (app \(Self.appStateName)); continuing in the app")
+        task.expirationHandler = nil
+        task.setTaskCompleted(success: false)
+        job.systemTask = nil
+        job.continuesInBackground = false
+        beginAppBackgroundTask(for: job)
     }
 
-    private func expire(_ job: ProcessingJob) {
+    private func runInApp(_ job: ProcessingJob) {
+        beginAppBackgroundTask(for: job)
+        if job.task == nil {
+            run(job)
+        }
+    }
+
+    /// Covers the short grace period iOS gives after the user leaves the app.
+    private func beginAppBackgroundTask(for job: ProcessingJob) {
+        guard job.appBackgroundTask == .invalid else { return }
+        job.appBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Making flashcards") { [weak self, weak job] in
+            guard let self, let job else { return }
+            self.appTimeExpired(job)
+        }
+    }
+
+    private func appTimeExpired(_ job: ProcessingJob) {
+        let identifier = job.appBackgroundTask
+        job.appBackgroundTask = .invalid
+        if identifier != .invalid {
+            UIApplication.shared.endBackgroundTask(identifier)
+        }
         guard job.isRunning else { return }
-        job.expired = true
+        if UIApplication.shared.applicationState == .active {
+            // Back in the app; nothing to stop.
+            return
+        }
+        log.record("Background time ran out; pausing \(job.title)")
+        job.pausing = true
         job.task?.cancel()
+    }
+
+    private static var appStateName: String {
+        switch UIApplication.shared.applicationState {
+        case .active: "active"
+        case .inactive: "inactive"
+        case .background: "in background"
+        @unknown default: "unknown"
+        }
     }
 
     // MARK: Running
@@ -209,29 +322,45 @@ final class ProcessingCenter {
             guard let self else { return }
             do {
                 let result = try await self.perform(job, reporter: reporter)
-                self.complete(job, deckID: result.deckID, cardCount: result.cardCount)
+                self.complete(job, deckID: result.deckID, summary: result.summary)
             } catch {
                 self.fail(job, with: error)
             }
         }
     }
 
-    private func perform(_ job: ProcessingJob, reporter: ProcessingReporter) async throws -> (deckID: UUID, cardCount: Int) {
-        let context = container.mainContext
+    private func perform(_ job: ProcessingJob, reporter: ProcessingReporter) async throws -> (deckID: UUID, summary: String) {
         switch job.kind {
         case .newDeck(let source, let density):
             let deck = try await DeckCreator.createDeck(
-                from: source, density: density, sync: sync, context: context, reporter: reporter
+                from: source, density: density, sync: sync, context: container.mainContext, reporter: reporter
             )
-            return (deck.id, deck.cards.count)
+            return (deck.id, Self.cardCountText(deck.cards.count))
         case .regenerate(let deckID):
-            let descriptor = FetchDescriptor<Deck>(predicate: #Predicate { $0.id == deckID })
-            guard let deck = try context.fetch(descriptor).first else {
-                throw DocSyncService.SyncError.deckRemoved
-            }
+            let deck = try fetchDeck(deckID)
             try await sync.regenerate(deck, reporter: reporter)
-            return (deck.id, deck.cards.count)
+            return (deck.id, Self.cardCountText(deck.cards.count))
+        case .updateNotes(let deckID, let text):
+            let deck = try fetchDeck(deckID)
+            let summary = try await sync.updateNotes(of: deck, to: text, reporter: reporter)
+            return (deck.id, summary)
+        case .syncDoc(let deckID, let text):
+            let deck = try fetchDeck(deckID)
+            try await sync.applyDocChange(to: deck, text: text, reporter: reporter)
+            return (deck.id, deck.lastSyncSummary ?? "Up to date")
         }
+    }
+
+    private func fetchDeck(_ id: UUID) throws -> Deck {
+        let descriptor = FetchDescriptor<Deck>(predicate: #Predicate { $0.id == id })
+        guard let deck = try container.mainContext.fetch(descriptor).first else {
+            throw DocSyncService.SyncError.deckRemoved
+        }
+        return deck
+    }
+
+    private static func cardCountText(_ count: Int) -> String {
+        count == 1 ? "1 card" : "\(count) cards"
     }
 
     private func apply(_ update: ProcessingUpdate, toJobWithID id: UUID) {
@@ -249,32 +378,43 @@ final class ProcessingCenter {
         pushSystemProgress(for: job)
     }
 
-    private func complete(_ job: ProcessingJob, deckID: UUID, cardCount: Int) {
+    private func complete(_ job: ProcessingJob, deckID: UUID, summary: String) {
         job.estimator?.recordCompletion()
         job.reportedFraction = 1
-        job.state = .finished(deckID: deckID, cardCount: cardCount)
+        job.state = .finished(deckID: deckID, summary: summary)
+        log.record("Finished in \(Int(Date.now.timeIntervalSince(job.startedAt)))s: \(job.title) (\(summary))")
         endBackgroundWork(for: job, success: true)
-        notifyIfInBackground(
-            title: "“\(job.title)” is ready",
-            body: "\(cardCount) flashcards are ready to study.",
-            deckID: deckID
-        )
+        switch job.kind {
+        case .newDeck, .regenerate:
+            notifyIfInBackground(title: "“\(job.title)” is ready", body: "\(summary) ready to study.", deckID: deckID)
+        case .updateNotes, .syncDoc:
+            notifyIfInBackground(title: "“\(job.title)” updated", body: summary, deckID: deckID)
+        }
     }
 
     private func fail(_ job: ProcessingJob, with error: Error) {
         let wasCancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
-        if wasCancelled && !job.expired {
-            // The user cancelled.
-            endBackgroundWork(for: job, success: false)
+        endBackgroundWork(for: job, success: false)
+        if job.pausing {
+            log.record("Paused: \(job.title) (\(DiagnosticsLog.describe(error)))")
+            job.state = .paused
+            notifyIfInBackground(
+                title: "“\(job.title)” is paused",
+                body: "Open NoteFlash to finish it.",
+                deckID: nil
+            )
+            return
+        }
+        if wasCancelled {
+            log.record("Cancelled: \(job.title)")
             jobs.removeAll { $0.id == job.id }
             return
         }
-        let message = job.expired
-            ? "iOS stopped processing to save resources. Tap Retry to try again."
-            : error.localizedDescription
-        job.state = .failed(message)
-        endBackgroundWork(for: job, success: false)
-        notifyIfInBackground(title: "Couldn't finish “\(job.title)”", body: message, deckID: nil)
+        let detail = DiagnosticsLog.describe(error)
+        log.record("Failed: \(job.title) — \(detail)")
+        job.errorDetail = detail
+        job.state = .failed(error.localizedDescription)
+        notifyIfInBackground(title: "Couldn't finish “\(job.title)”", body: error.localizedDescription, deckID: nil)
     }
 
     private func endBackgroundWork(for job: ProcessingJob, success: Bool) {
@@ -288,12 +428,13 @@ final class ProcessingCenter {
             UIApplication.shared.endBackgroundTask(job.appBackgroundTask)
             job.appBackgroundTask = .invalid
         }
+        job.continuesInBackground = false
         job.task = nil
     }
 
     // MARK: System progress
 
-    /// Keeps the system Live Activity's progress and time estimate moving between engine updates.
+    /// Updates the system Live Activity every couple of seconds so progress never looks stalled.
     private func startTicker() {
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
@@ -309,12 +450,17 @@ final class ProcessingCenter {
 
     private func pushSystemProgress(for job: ProcessingJob, force: Bool = false) {
         guard let task = job.systemTask else { return }
-        let fraction = job.fraction() ?? 0
-        task.progress.completedUnitCount = Int64(fraction * Double(task.progress.totalUnitCount))
+        // iOS may end tasks whose progress stops moving, so always advance a little, even when
+        // the engine is between updates. Stays below 100% until the job finishes.
+        let target = Int64((job.fraction() ?? 0) * Double(Self.systemUnitCount))
+        let units = min(Self.systemUnitCount - 100, max(target, job.systemUnits + 1))
+        job.systemUnits = units
+        task.progress.completedUnitCount = units
+
         let subtitle = "\(job.title) · \(job.statusLine())"
         guard force || subtitle != job.lastSystemSubtitle else { return }
         job.lastSystemSubtitle = subtitle
-        task.updateTitle("Making flashcards", subtitle: subtitle)
+        task.updateTitle(job.activityLabel.capitalizedFirstWordOnly, subtitle: subtitle)
     }
 
     // MARK: Notifications
@@ -336,6 +482,14 @@ final class ProcessingCenter {
         }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+}
+
+private extension String {
+    /// "Making Flashcards" → "Making flashcards", for system UI.
+    var capitalizedFirstWordOnly: String {
+        guard let first else { return self }
+        return first.uppercased() + dropFirst().lowercased()
     }
 }
 

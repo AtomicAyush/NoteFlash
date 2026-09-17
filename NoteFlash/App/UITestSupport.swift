@@ -59,8 +59,19 @@ nonisolated struct SampleFlashcardEngine: FlashcardEngine {
         return GeneratedDeck(title: "Sample Deck", cards: cards)
     }
 
-    func reviseDeck(existing: [ExistingCard], changes: NoteChanges, updatedNotes: String, density: CardDensity) async throws -> DeckRevision {
-        DeckRevision(updated: [], removed: [], added: [])
+    func reviseDeck(
+        existing: [ExistingCard], changes: NoteChanges, updatedNotes: String, density: CardDensity,
+        progress: GenerationProgressHandler?
+    ) async throws -> DeckRevision {
+        let steps = 10
+        for step in 0..<steps {
+            try await Task.sleep(for: .milliseconds(600))
+            progress?(GenerationProgress(fraction: Double(step + 1) / Double(steps), detail: "Updating cards"))
+        }
+        let added = changes.hunks.flatMap(\.added).map { line in
+            GeneratedCard(front: "What do the notes say about “\(line.prefix(30))”?", back: line)
+        }
+        return DeckRevision(updated: [], removed: [], added: added)
     }
 }
 

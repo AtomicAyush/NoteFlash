@@ -83,7 +83,8 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
         existing: [ExistingCard],
         changes: NoteChanges,
         updatedNotes: String,
-        density: CardDensity
+        density: CardDensity,
+        progress: GenerationProgressHandler?
     ) async throws -> DeckRevision {
         let system = """
             You maintain a flashcard deck generated from a student's notes. The notes were just edited. \
@@ -127,9 +128,20 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
             "removed": .arrayOf(.stringType),
             "added": .arrayOf(Self.cardSchema),
         ])
+        // The reply lists only affected cards; assume it's around the size of the edits.
+        let expectedOutput = Double(max(300, changes.rendered.count))
+        progress?(GenerationProgress(fraction: 0.02, detail: "Claude is reading your changes"))
+        let onTextProgress: (@Sendable (Int) -> Void)? = progress.map { report in
+            { @Sendable streamed in
+                let share = min(1, Double(streamed) / expectedOutput)
+                report(GenerationProgress(fraction: 0.1 + 0.88 * share, detail: "Updating cards"))
+            }
+        }
         let response = try await client.structuredResponse(
-            system: system, content: [.text(prompt)], schema: schema, as: RevisionResponse.self
+            system: system, content: [.text(prompt)], schema: schema, as: RevisionResponse.self,
+            onTextProgress: onTextProgress
         )
+        progress?(GenerationProgress(fraction: 1, detail: "Done"))
         let removedIDs = Set(response.removed)
         let existingFronts = Set(existing.filter { !removedIDs.contains($0.id) }.map { CardWriting.normalizedKey($0.front) })
         return DeckRevision(

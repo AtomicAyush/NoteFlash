@@ -2,6 +2,7 @@ import BackgroundTasks
 import Foundation
 import Observation
 import SwiftData
+import UIKit
 
 /// Keeps decks in step with their notes: polls linked Google Docs while the app is open,
 /// checks again from background app refresh, and has the AI engine revise only the affected cards.
@@ -20,6 +21,9 @@ final class DocSyncService {
     }
 
     private(set) var busyDeckIDs: Set<UUID> = []
+    /// Called when a linked doc changed while the app is open, so the update can run as a
+    /// visible processing job. Without it, updates run inline.
+    var onDocChanged: ((Deck, GoogleDocContent) -> Void)?
     private let container: ModelContainer
     private let googleAuth: GoogleAuth
     private var pollTask: Task<Void, Never>?
@@ -75,29 +79,45 @@ final class DocSyncService {
         }
     }
 
-    /// Checks one linked doc and revises the deck if the doc changed.
-    /// Returns a summary of the changes, or nil if the doc is unchanged.
+    /// Checks one linked doc. If it changed, the update is handed to `onDocChanged` while the
+    /// app is open, or applied here otherwise. Returns whether the doc changed.
     @discardableResult
-    func sync(_ deck: Deck) async throws -> String? {
-        guard let documentID = deck.googleDocID else { return nil }
-        return try await exclusively(deck) {
+    func sync(_ deck: Deck) async throws -> Bool {
+        guard let documentID = deck.googleDocID, !isBusy(deck) else { return false }
+        let document: GoogleDocContent
+        do {
+            document = try await fetchDocument(id: documentID)
+        } catch {
+            if !deck.isGone {
+                deck.lastSyncError = error.localizedDescription
+                save()
+            }
+            throw error
+        }
+        guard !deck.isGone else { return false }
+        deck.lastCheckedAt = .now
+
+        guard TextDiff.fingerprint(of: document.text) != deck.sourceHash else {
+            deck.lastSyncError = nil
+            save()
+            return false
+        }
+        if let onDocChanged, UIApplication.shared.applicationState == .active {
+            onDocChanged(deck, document)
+        } else {
+            try await applyDocChange(to: deck, text: document.text)
+        }
+        return true
+    }
+
+    /// Revises a linked deck to match the doc's new text.
+    func applyDocChange(to deck: Deck, text: String, reporter: ProcessingReporter = .silent) async throws {
+        try await exclusively(deck) {
             do {
-                let document = try await fetchDocument(id: documentID)
-                guard !deck.isGone else { throw SyncError.deckRemoved }
-                deck.lastCheckedAt = .now
-
-                let fingerprint = TextDiff.fingerprint(of: document.text)
-                guard fingerprint != deck.sourceHash else {
-                    deck.lastSyncError = nil
-                    save()
-                    return nil
-                }
-
-                let summary = try await revise(deck, toMatch: document.text)
-                deck.sourceHash = fingerprint
+                _ = try await revise(deck, toMatch: text, reporter: reporter)
+                deck.sourceHash = TextDiff.fingerprint(of: text)
                 deck.lastSyncError = nil
                 save()
-                return summary
             } catch {
                 if !deck.isGone {
                     deck.lastSyncError = error.localizedDescription
@@ -143,9 +163,9 @@ final class DocSyncService {
 
     /// Saves hand-edited notes for a text deck and revises the affected cards.
     @discardableResult
-    func updateNotes(of deck: Deck, to newText: String) async throws -> String {
+    func updateNotes(of deck: Deck, to newText: String, reporter: ProcessingReporter = .silent) async throws -> String {
         try await exclusively(deck) {
-            let summary = try await revise(deck, toMatch: newText)
+            let summary = try await revise(deck, toMatch: newText, reporter: reporter)
             save()
             return summary
         }
@@ -213,7 +233,7 @@ final class DocSyncService {
     }
 
     /// Asks the AI engine which cards the note edits affect, then applies its revisions.
-    private func revise(_ deck: Deck, toMatch newText: String) async throws -> String {
+    private func revise(_ deck: Deck, toMatch newText: String, reporter: ProcessingReporter = .silent) async throws -> String {
         guard let changes = TextDiff.changes(from: deck.sourceText, to: newText) else {
             deck.sourceText = newText
             return "No changes to the notes"
@@ -227,12 +247,16 @@ final class DocSyncService {
             existing.append(ExistingCard(id: key, front: card.front, back: card.back, locked: card.isUserEdited))
         }
 
-        let engine = try AIEngineKind.selected.makeEngine()
+        let engineKind = AIEngineKind.selected
+        let engine = try engineKind.makeEngine()
+        // Editing work scales with the size of the edits, not the whole doc.
+        reporter.send(.workload(characters: changes.rendered.count, engine: engineKind))
         let revision = try await engine.reviseDeck(
             existing: existing,
             changes: changes,
             updatedNotes: newText,
-            density: deck.density
+            density: deck.density,
+            progress: reporter.generationHandler
         )
         guard !deck.isGone else { throw SyncError.deckRemoved }
 

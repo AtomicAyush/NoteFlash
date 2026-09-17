@@ -117,7 +117,9 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     }
 
     private static let options = GenerationOptions(temperature: 0.3)
-    private static let maxRelatedCards = 10
+    /// Cards reviewed per edited section, in batches small enough for the context window.
+    private static let maxReviewedCards = 40
+    private static let reviewBatchSize = 8
 
     init() throws {
         if let reason = Self.unavailableReason {
@@ -360,7 +362,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 Write each card as two lines, then a blank line:
                 Q: <question>
                 A: <answer>
-                Write nothing else.
+                Keep each answer short: the name, date, term, or phrase that answers the question, \
+                not the whole sentence from the notes. Write nothing else.
                 """
         )
         do {
@@ -448,24 +451,24 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             """
         do {
             let stream = makeSession().streamResponse(to: prompt, generating: AppleCardSet.self, options: Self.options)
-            var latest: GeneratedContent?
+            var latest: AppleCardSet.PartiallyGenerated?
+            var sawSnapshot = false
             for try await snapshot in stream {
-                latest = snapshot.rawContent
-                let partialCards = snapshot.content.cards ?? []
-                onEvent(.cards(partialCards.count))
-                if partialCards.count > cap {
-                    // Stop a runaway response and keep the cards written so far (all but the last are complete).
-                    let complete = partialCards.prefix(cap).compactMap { partial -> AppleCard? in
-                        guard let question = partial.question, let answer = partial.answer else { return nil }
-                        return AppleCard(fact: partial.fact ?? "", question: question, answer: answer)
-                    }
-                    return [AppleCardSet(title: snapshot.content.title ?? "", cards: complete)]
-                }
+                sawSnapshot = true
+                latest = snapshot.content
+                let count = snapshot.content.cards?.count ?? 0
+                onEvent(.cards(count))
+                // Stop a runaway response; the cards written so far are kept below.
+                if count > cap { break }
             }
-            if let latest, let set = try? AppleCardSet(latest) {
-                return [set]
+            guard sawSnapshot, let latest else { throw EngineError.generationFailed }
+            // Build the result from the last snapshot rather than re-parsing the raw output.
+            let cards = (latest.cards ?? []).prefix(cap).compactMap { partial -> AppleCard? in
+                guard let question = partial.question, let answer = partial.answer,
+                      !question.isEmpty, !answer.isEmpty else { return nil }
+                return AppleCard(fact: partial.fact ?? "", question: question, answer: answer)
             }
-            return [try await stream.collect().content]
+            return [AppleCardSet(title: latest.title ?? "", cards: cards)]
         } catch where AppleModelFailure(error) == .rateLimited && attempt < Self.rateLimitRetries {
             onEvent(.waiting)
             try await Task.sleep(for: .seconds(5))
@@ -522,7 +525,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         existing: [ExistingCard],
         changes: NoteChanges,
         updatedNotes: String,
-        density: CardDensity
+        density: CardDensity,
+        progress: GenerationProgressHandler?
     ) async throws -> DeckRevision {
         let editable = existing.filter { !$0.locked }
         let noteLines = TextDiff.lines(of: updatedNotes)
@@ -534,21 +538,57 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             .flatMap { $0.split(maxCharacters: Self.onDeviceChunkCharacters / 2) }
 
         do {
-            for hunk in hunks {
+            for (index, hunk) in hunks.enumerated() {
                 try Task.checkCancellation()
+                let label = hunks.count > 1 ? "Change \(index + 1) of \(hunks.count)" : "Updating cards"
+                let report = { (withinChange: Double, detail: String) in
+                    let overall = (Double(index) + min(max(withinChange, 0), 1)) / Double(hunks.count)
+                    progress?(GenerationProgress(fraction: overall * 0.98, detail: detail))
+                }
+                report(0, label)
                 do {
                     try await review(hunk, cards: editable, noteWords: noteWords, into: &revision)
                 } catch where AppleModelFailure(error) == .guardrail {
                     revision.skippedSections += 1
                 }
+                report(0.35, label)
+                let expectedCards = Double(Self.estimatedCardCount(for: hunk.added.joined(separator: "\n"), density: density))
                 do {
-                    try await writeCards(forAddedLinesIn: hunk, noteLines: noteLines, density: density, into: &revision)
+                    try await writeCards(
+                        forAddedLinesIn: hunk, noteLines: noteLines, density: density,
+                        onEvent: { event in
+                            switch event {
+                            case .cards(let count): report(0.35 + 0.6 * min(1, Double(count) / expectedCards), label)
+                            case .waiting: report(0.35, "Waiting for Apple Intelligence")
+                            }
+                        },
+                        into: &revision
+                    )
                 } catch where AppleModelFailure(error) == .guardrail {
                     revision.skippedSections += 1
                 }
+                report(1, label)
             }
         } catch {
             throw Self.friendlyError(error)
+        }
+
+        // Big deletions can touch more cards than the model reviewed. A card whose answer came
+        // from deleted text and no longer appears anywhere in the notes is stale.
+        let removedLines = hunks.flatMap(\.removed).filter { !$0.hasPrefix("#") }
+        let removedWords = CardMatcher.keywords(in: removedLines.joined(separator: " "))
+        let removedLineWords = removedLines.map(CardMatcher.keywords(in:))
+        let noteLineWords = noteLines.filter { !$0.hasPrefix("#") }.map(CardMatcher.keywords(in:))
+        let handled = Set(revision.removed).union(revision.updated.map(\.id))
+        for card in editable where !handled.contains(card.id) {
+            let answerWords = CardMatcher.keywords(in: card.back)
+            let answerGone = !answerWords.isDisjoint(with: removedWords)
+                && CardMatcher.isAnswerMissing(card.back, fromNoteWords: noteWords)
+            if answerGone || CardMatcher.isSourcedFromRemovedText(
+                card, removedLines: removedLineWords, noteLines: noteLineWords
+            ) {
+                revision.removed.append(card.id)
+            }
         }
 
         // Keep only new cards that don't repeat a card staying in the deck.
@@ -564,39 +604,49 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         revision.added = CardWriting.cleaned(revision.added, excludingFronts: keptFronts)
             .filter { new in !remaining.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
         revision.updated = Array(updatedByID.values)
+        progress?(GenerationProgress(fraction: 1, detail: "Done"))
         return revision
     }
 
-    /// Decides keep/update/remove for the cards related to the lines this hunk removed.
+    /// Decides keep/update/remove for the cards related to the lines this hunk removed,
+    /// a few cards at a time so large edits are fully covered.
     private func review(
         _ hunk: TextDiff.Hunk,
         cards: [ExistingCard],
         noteWords: Set<String>,
-        depth: Int = 0,
         into revision: inout DeckRevision
     ) async throws {
         guard !hunk.removed.isEmpty else { return }
-        let related = CardMatcher.related(to: hunk, in: cards, limit: Self.maxRelatedCards)
-            .filter { card in !revision.removed.contains(card.id) && !revision.updated.contains { $0.id == card.id } }
-        guard !related.isEmpty else { return }
+        let related = CardMatcher.related(to: hunk, in: cards, limit: Self.maxReviewedCards)
+        for start in stride(from: 0, to: related.count, by: Self.reviewBatchSize) {
+            try Task.checkCancellation()
+            let batch = related[start..<min(start + Self.reviewBatchSize, related.count)]
+                .filter { card in !revision.removed.contains(card.id) && !revision.updated.contains { $0.id == card.id } }
+            guard !batch.isEmpty else { continue }
+            try await review(hunk, batch: Array(batch), noteWords: noteWords, into: &revision)
+        }
+    }
 
-        let decisions: [AppleCardDecision]
+    private func review(
+        _ hunk: TextDiff.Hunk,
+        batch related: [ExistingCard],
+        noteWords: Set<String>,
+        depth: Int = 0,
+        into revision: inout DeckRevision
+    ) async throws {
+        let decisions: [ReviewDecision]
         do {
-            decisions = try await Self.onDeviceSession(Self.reviewInstructions).respond(
-                to: Self.reviewPrompt(hunk: hunk, cards: related),
-                generating: AppleCardReview.self,
-                options: Self.options
-            ).content.decisions
+            decisions = try await Self.reviewDecisions(for: hunk, cards: related)
         } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
             let pieces = hunk.split(maxCharacters: max(200, hunk.characterCount / 2))
             guard pieces.count > 1 else { throw error }
             for piece in pieces {
-                try await review(piece, cards: cards, noteWords: noteWords, depth: depth + 1, into: &revision)
+                try await review(piece, batch: related, noteWords: noteWords, depth: depth + 1, into: &revision)
             }
             return
         }
 
-        var decisionsByID: [String: AppleCardDecision] = [:]
+        var decisionsByID: [String: ReviewDecision] = [:]
         for decision in decisions {
             let id = Self.normalizedID(decision.id)
             if decisionsByID[id] == nil { decisionsByID[id] = decision }
@@ -606,7 +656,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         // anywhere in the notes is stale even if the model missed it.
         for card in related {
             let isStale = CardMatcher.isAnswerMissing(card.back, fromNoteWords: noteWords)
-            guard let decision = decisionsByID[card.id], !decision.stillCorrect else {
+            guard let decision = decisionsByID[card.id], decision.action != .keep else {
                 if isStale { revision.removed.append(card.id) }
                 continue
             }
@@ -614,7 +664,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             let back = decision.back.trimmingCharacters(in: .whitespacesAndNewlines)
             let isRealUpdate = decision.action == .update
                 && !front.isEmpty && !back.isEmpty
-                && (front != card.front || back != card.back)
+                && (CardWriting.normalizedKey(front) != CardWriting.normalizedKey(card.front)
+                    || CardWriting.normalizedKey(back) != CardWriting.normalizedKey(card.back))
                 && !CardMatcher.isAnswerMissing(back, fromNoteWords: noteWords)
                 && !Self.isBloated(back, comparedTo: card.back)
             if isRealUpdate {
@@ -625,21 +676,108 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         }
     }
 
+    private struct ReviewDecision {
+        var id: String
+        var action: AppleCardAction
+        var front: String
+        var back: String
+    }
+
+    /// Asks the model what to do with each card. History and other sensitive subjects can trip
+    /// the guardrails for structured output, so a refused review is retried as plain text
+    /// under the permissive guardrails.
+    private static func reviewDecisions(for hunk: TextDiff.Hunk, cards: [ExistingCard]) async throws -> [ReviewDecision] {
+        let prompt = reviewPrompt(hunk: hunk, cards: cards)
+        do {
+            let review = try await retryingRateLimits {
+                try await onDeviceSession(reviewInstructions).respond(
+                    to: prompt, generating: AppleCardReview.self, options: options
+                ).content
+            }
+            return review.decisions.map { decision in
+                ReviewDecision(
+                    id: decision.id,
+                    action: decision.stillCorrect ? .keep : decision.action,
+                    front: decision.front,
+                    back: decision.back
+                )
+            }
+        } catch where AppleModelFailure(error) == .guardrail {
+            let session = LanguageModelSession(
+                model: permissiveModel,
+                instructions: """
+                    \(reviewInstructions)
+                    Answer with one line per card and nothing else, in this format:
+                    c1: keep
+                    c2: remove
+                    c3: update | <corrected question> | <corrected answer>
+                    """
+            )
+            let text = try await retryingRateLimits {
+                try await session.respond(to: prompt, options: options).content
+            }
+            return parsePlainTextReviewDecisions(text)
+        }
+    }
+
+    /// Parses "c3: update | question | answer" lines, tolerating list markers and brackets.
+    static func parsePlainTextReview(_ text: String) -> [(id: String, action: String, front: String, back: String)] {
+        parsePlainTextReviewDecisions(text).map { ($0.id, "\($0.action)", $0.front, $0.back) }
+    }
+
+    private static func parsePlainTextReviewDecisions(_ text: String) -> [ReviewDecision] {
+        let pattern = #/^[\W\d_]*(c\d+)\W*?[:\-–]\s*\**\s*(keep|update|remove)\b\**(.*)$/#.ignoresCase()
+        var decisions: [ReviewDecision] = []
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let match = line.firstMatch(of: pattern) else { continue }
+            let action: AppleCardAction = switch match.2.lowercased() {
+            case "update": .update
+            case "remove": .remove
+            default: .keep
+            }
+            let parts = match.3.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            decisions.append(ReviewDecision(
+                id: String(match.1).lowercased(),
+                action: action,
+                front: parts.count >= 2 ? parts[0] : "",
+                back: parts.count >= 2 ? parts[1] : ""
+            ))
+        }
+        return decisions
+    }
+
+    /// Runs model work, waiting out the limits iOS puts on background use.
+    private static func retryingRateLimits<T>(_ work: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await work()
+            } catch where AppleModelFailure(error) == .rateLimited && attempt < rateLimitRetries {
+                attempt += 1
+                try await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+
     /// Writes cards for the lines this hunk added, using the nearest heading as context.
     private func writeCards(
         forAddedLinesIn hunk: TextDiff.Hunk,
         noteLines: [String],
         density: CardDensity,
+        onEvent: (SectionEvent) -> Void,
         into revision: inout DeckRevision
     ) async throws {
         let added = hunk.added.filter { !$0.hasPrefix("#") }
         guard !added.isEmpty else { return }
 
         var request = "These lines were just added to the student's notes. Write flashcards only for the facts in these lines."
+        var sourceText = added.joined(separator: " ")
         if let firstIndex = noteLines.firstIndex(of: added[0]),
            let heading = noteLines[..<firstIndex].last(where: { $0.hasPrefix("#") }) {
             let topic = heading.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
             request += " They belong to the section \"\(topic)\"."
+            sourceText += " " + topic
         }
 
         let instructions = Self.generationInstructions(density: density)
@@ -647,10 +785,16 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             for: added.joined(separator: "\n"),
             request: request,
             density: density,
-            onEvent: { _ in },
+            onEvent: onEvent,
             makeSession: { Self.onDeviceSession(instructions) }
         )
-        revision.added += section.cards
+        // With only a few lines of context the model sometimes answers from general knowledge.
+        let sourceWords = CardMatcher.keywords(in: sourceText)
+        revision.added += section.cards.filter { card in
+            let answerWords = CardMatcher.keywords(in: card.back)
+            guard answerWords.count >= 2 else { return true }
+            return answerWords.intersection(sourceWords).count * 2 >= answerWords.count
+        }
     }
 
     // MARK: Prompts

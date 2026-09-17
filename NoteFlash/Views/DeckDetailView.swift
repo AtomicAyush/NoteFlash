@@ -23,7 +23,8 @@ struct DeckDetailView: View {
     private var cards: [Flashcard] { deck.sortedCards }
     private var starredCards: [Flashcard] { cards.filter(\.isStarred) }
     private var isBusy: Bool { sync.isBusy(deck) }
-    private var regenerationJob: ProcessingJob? { processing.runningJob(forDeck: deck.id) }
+    private var deckJob: ProcessingJob? { processing.unfinishedJob(forDeck: deck.id) }
+    private var isJobRunning: Bool { deckJob?.isRunning == true }
 
     private var studyCards: [Flashcard] {
         starredOnly && !starredCards.isEmpty ? starredCards : cards
@@ -31,11 +32,11 @@ struct DeckDetailView: View {
 
     var body: some View {
         List {
-            if let regenerationJob {
+            if let deckJob {
                 Section {
-                    ProcessingJobRow(job: regenerationJob)
+                    ProcessingJobRow(job: deckJob)
                 } header: {
-                    Text("Rewriting Cards")
+                    Text(deckJob.activityLabel)
                 }
             }
 
@@ -99,7 +100,7 @@ struct DeckDetailView: View {
             if deck.isLinkedToGoogleDoc { await checkDoc() }
         }
         .overlay {
-            if isBusy && regenerationJob == nil {
+            if isBusy && !isJobRunning {
                 WorkingOverlay(title: "Updating cards…", subtitle: "\(AIEngineKind.selected.label) is revising this deck.")
             }
         }
@@ -198,7 +199,7 @@ struct DeckDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(isBusy)
+                .disabled(isBusy || isJobRunning)
             }
             if let summary = deck.lastSyncSummary, let changed = deck.lastChangedAt {
                 Text("Last change: \(summary), \(changed, format: .relative(presentation: .named))")
@@ -254,7 +255,7 @@ struct DeckDetailView: View {
                 .pickerStyle(.menu)
                 Divider()
                 Button("Regenerate Cards", systemImage: "sparkles") { isConfirmingRegenerate = true }
-                    .disabled(isBusy || regenerationJob != nil)
+                    .disabled(isBusy || isJobRunning)
                 Button("Reset Progress", systemImage: "arrow.counterclockwise") { isConfirmingReset = true }
             }
         }

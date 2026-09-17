@@ -13,10 +13,12 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
   - **Flashcards:** flip cards and swipe them into Know or Still learning.
   - **Learn:** rounds that start with multiple choice and move to typed or self-graded recall.
   - **Match:** a timed matching game with penalties for wrong matches and a best time.
-- **Background processing:** Generate closes right away and the deck list shows each job's progress and time left.
+- **Background processing:** new decks, regenerated decks, note edits, and Google Doc updates all run as background jobs. The deck list shows each job's progress and time left.
   - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen.
-  - **When a job finishes in the background:** a notification lets you open the new deck.
+  - **If iOS stops background work:** the job pauses and picks up again when you open NoteFlash.
+  - **When a job finishes in the background:** a notification lets you open the deck.
   - **Time estimates:** they learn how fast your device (or Claude) actually is.
+  - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy.
 - **Deck tools:** stars, a "study starred only" filter, search, editing notes (text decks), regenerating a deck, and resetting progress.
 
 ## Requirements
@@ -69,11 +71,16 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Apple Intelligence:** handles one contiguous edit at a time:
   - For removed or changed lines, it first judges whether each related card is still correct, then keeps, updates, or removes it.
   - For added lines, it writes new cards, and near-duplicates of existing cards are dropped.
-  - A card whose answer no longer appears anywhere in the notes is removed.
+  - Large edits are split into separate changes, and each gets its own review and card limit, so a big update isn't capped at a few cards.
+  - If Apple's safety filter blocks a structured review (common with history notes), the review is retried as plain text.
+  - After the reviews, a check removes cards that clearly came from deleted lines: cards whose answer no longer appears in the notes, or that match a deleted line much better than any remaining one.
 
 **Background processing.** `ProcessingCenter` runs each job as an iOS continued-processing task (`BGContinuedProcessingTask`, iOS 26+).
 - **Live Activity:** the system shows it in the Dynamic Island and on the Lock Screen. The app updates its progress and subtitle ("About 40 sec left · Section 2 of 5").
-- **Fallback:** if iOS declines the request, the job runs in the app, with the usual short grace period after you leave.
+- **Heartbeat:** iOS may end continued-processing tasks whose progress stalls, so the reported progress moves forward every 2 seconds, even while the model is between updates.
+- **Fallback:** if iOS declines the request or later withdraws the time, the job keeps running in the app. If the app is in the background when the short grace period runs out, the job pauses and resumes the next time the app becomes active.
+- **Model limits:** Apple's model is rate-limited in the background, so requests wait and retry for about a minute before giving up.
+- **Diagnostics:** `DiagnosticsLog` records job events and full error descriptions to the system log (subsystem `com.ayushkansal.NoteFlash`) and to `Documents/NoteFlash-processing-log.txt`.
 - **Time estimates:** `ProcessingEstimator` starts from a per-engine rate (seconds per 1,000 characters), blends in the observed pace as progress arrives, and saves the rate it measures when each job finishes.
 
 **Apple's cloud model (optional).** On iOS 27, `AppConfig.usePrivateCloudCompute` sends notes too long for one on-device request to Apple's larger Private Cloud Compute model. It needs the Private Cloud Compute managed entitlement from Apple ([details](https://developer.apple.com/private-cloud-compute/)), so it's off by default.

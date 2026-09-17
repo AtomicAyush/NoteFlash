@@ -56,7 +56,7 @@ struct DeckListView: View {
                             ProcessingJobRow(job: job, onOpen: openDeck)
                         }
                     } header: {
-                        Text("Making Flashcards")
+                        Text("Processing")
                     }
                 }
 

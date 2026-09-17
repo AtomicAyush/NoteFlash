@@ -1,27 +1,27 @@
 import SwiftUI
 
-/// Edits a text deck's notes; the AI engine then updates only the affected cards.
+/// Edits a text deck's notes; the AI engine then updates only the affected cards in the background.
 struct NotesEditorView: View {
     let deck: Deck
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(DocSyncService.self) private var sync
+    @Environment(ProcessingCenter.self) private var processing
     @State private var text: String
-    @State private var isSaving = false
-    @State private var errorMessage: String?
 
     init(deck: Deck) {
         self.deck = deck
         _text = State(initialValue: deck.sourceText)
     }
 
+    private var isDeckBusy: Bool { processing.runningJob(forDeck: deck.id) != nil }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if let errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                if isDeckBusy {
+                    Label("This deck is being updated. You can save once that finishes.", systemImage: "hourglass")
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.secondary)
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -36,29 +36,12 @@ struct NotesEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Update Cards") {
-                        Task { await save() }
+                        processing.updateNotes(of: deck, to: text)
+                        dismiss()
                     }
-                    .disabled(isSaving || text == deck.sourceText)
+                    .disabled(isDeckBusy || text == deck.sourceText)
                 }
             }
-            .overlay {
-                if isSaving {
-                    WorkingOverlay(title: "Updating cards…", subtitle: "\(AIEngineKind.selected.label) is checking which cards your edits affect.")
-                }
-            }
-            .interactiveDismissDisabled(isSaving)
-        }
-    }
-
-    private func save() async {
-        isSaving = true
-        errorMessage = nil
-        defer { isSaving = false }
-        do {
-            try await sync.updateNotes(of: deck, to: text)
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 }

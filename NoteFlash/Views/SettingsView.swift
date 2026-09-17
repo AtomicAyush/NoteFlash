@@ -26,6 +26,13 @@ struct SettingsView: View {
                 }
                 GoogleAccountSection()
                 syncSection
+                Section {
+                    NavigationLink("Processing Log") { ProcessingLogView() }
+                } header: {
+                    Text("Troubleshooting")
+                } footer: {
+                    Text("A record of recent flashcard jobs, including why any of them stopped.")
+                }
                 Section("About") {
                     LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")
                     LabeledContent("AI model", value: engine == .claude ? AppConfig.claudeModel : "Apple on-device model")

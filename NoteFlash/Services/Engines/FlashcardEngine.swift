@@ -74,7 +74,8 @@ nonisolated protocol FlashcardEngine: Sendable {
         existing: [ExistingCard],
         changes: NoteChanges,
         updatedNotes: String,
-        density: CardDensity
+        density: CardDensity,
+        progress: GenerationProgressHandler?
     ) async throws -> DeckRevision
 }
 

@@ -47,6 +47,7 @@ struct NoteFlashApp: App {
         .onChange(of: scenePhase, initial: true) { _, phase in
             switch phase {
             case .active:
+                processing.appDidBecomeActive()
                 syncService.startForegroundPolling()
             case .background:
                 syncService.stopForegroundPolling()

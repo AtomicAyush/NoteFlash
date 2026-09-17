@@ -11,7 +11,7 @@ struct ProcessingJobRow: View {
         switch job.state {
         case .running:
             running
-        case .finished(let deckID, let cardCount):
+        case .finished(let deckID, let summary):
             Button {
                 processing.dismiss(job)
                 onOpen(deckID)
@@ -25,7 +25,7 @@ struct ProcessingJobRow: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text("Ready · ^[\(cardCount) card](inflect: true)")
+                        Text(finishedLine(summary))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -40,6 +40,24 @@ struct ProcessingJobRow: View {
             .swipeActions {
                 Button("Dismiss", systemImage: "xmark") { processing.dismiss(job) }
             }
+        case .paused:
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(job.title)
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text("Paused while NoteFlash was in the background. It picks up again when you open the app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                actions(primary: "Resume", systemImage: "play.fill")
+            }
+            .padding(.vertical, 2)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {
@@ -55,17 +73,38 @@ struct ProcessingJobRow: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                HStack {
-                    Button("Retry", systemImage: "arrow.clockwise") { processing.retry(job) }
-                        .buttonStyle(.bordered)
-                    Button("Dismiss") { processing.dismiss(job) }
-                        .buttonStyle(.bordered)
-                        .tint(.secondary)
+                if let detail = job.errorDetail {
+                    DisclosureGroup("Details") {
+                        Text(detail)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
                 }
-                .controlSize(.small)
+                actions(primary: "Retry", systemImage: "arrow.clockwise")
             }
             .padding(.vertical, 2)
         }
+    }
+
+    private func finishedLine(_ summary: String) -> String {
+        switch job.kind {
+        case .newDeck, .regenerate: "Ready · \(summary)"
+        case .updateNotes, .syncDoc: "Updated · \(summary)"
+        }
+    }
+
+    private func actions(primary: String, systemImage: String) -> some View {
+        HStack {
+            Button(primary, systemImage: systemImage) { processing.retry(job) }
+                .buttonStyle(.bordered)
+            Button("Dismiss") { processing.dismiss(job) }
+                .buttonStyle(.bordered)
+                .tint(.secondary)
+        }
+        .controlSize(.small)
     }
 
     private var running: some View {

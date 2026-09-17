@@ -44,17 +44,19 @@ nonisolated struct ProcessingEstimator: Sendable {
         pdfPages * 1_800
     }
 
-    /// Seconds left. Starts from the up-front estimate and trusts the observed pace more as progress grows.
+    /// Seconds left. Starts from the up-front estimate and trusts the observed pace more as
+    /// progress grows. Never drops to zero while work remains, so slow devices don't read
+    /// "Almost done" for minutes.
     func remaining(fraction: Double, now: Date = .now) -> TimeInterval {
         let elapsed = max(0, now.timeIntervalSince(startedAt))
         let progress = min(max(fraction, 0), 1)
-        var total = max(expectedDuration, 1)
-        if progress >= 0.05 {
-            let observed = elapsed / progress
-            let trust = min(1, progress * 1.5)
-            total = trust * observed + (1 - trust) * total
-        }
-        return max(0, total - elapsed)
+        guard progress < 1 else { return 0 }
+        let expected = max(expectedDuration, 1)
+        let prior = max(expected - elapsed, expected * (1 - progress) * 0.3)
+        guard progress >= 0.05 else { return max(prior, elapsed * 0.5) }
+        let observed = elapsed * (1 - progress) / progress
+        let trust = min(1, progress * 1.5)
+        return trust * observed + (1 - trust) * prior
     }
 
     /// Progress to show: what the engine reported, or the time-based share if that's further
