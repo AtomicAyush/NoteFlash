@@ -111,6 +111,7 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
   - **Marking:** after generating, regenerating, or updating, cards whose words match a priority (two key words, or the only one) are marked `isPriority`. New cards for priorities go first.
 
 **Sharing a deck.**
+- **Sent as a file:** the share sheet offers the page as plain file data. Offered as HTML, iOS would let apps that take text (AirDrop to a Mac, Messages, Mail) convert it to the page's words, which loses the deck embedded in it; the name still ends in `.html`, so it opens as a web page.
 - **One file for both:** `DeckShare` writes a self-contained web page (`DeckSharePage` holds its CSS and script). It shows the cards, a tap-to-flip study card, and the notes, and it prints as a card list. Nothing is loaded from the network, so it works offline, in Quick Look, and in email.
 - **Exactly the same deck:** the deck is also embedded in the page as JSON (`<script type="application/json" id="noteflash-deck">`), so NoteFlash rebuilds it card for card, in order, with exam priorities, the notes, and the card-detail setting. Card text is HTML-escaped, and `<` is escaped in the JSON so nothing in a card can end the element early.
 - **Adding a shared deck:** NoteFlash is registered for HTML files, so a shared file opened or shared into the app shows **Add Shared Deck** (`ImportSharedDeckView`) with the title and a preview. `SharedDeckImporter` then adds it with no AI pass: same cards, fresh study progress, source kind `shared`.

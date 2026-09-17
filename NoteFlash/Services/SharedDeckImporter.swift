@@ -33,8 +33,11 @@ struct SharedDeckFile: Transferable, Sendable {
         html = DeckShare.html(for: shared)
     }
 
+    /// Sent as a plain file, not as HTML: HTML counts as text, and apps that take text (AirDrop
+    /// to a Mac, Messages, Mail) would then be handed the page's words instead of the page,
+    /// which loses the deck inside it. The name still ends in .html, so it opens as a web page.
     static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .html) { file in
+        FileRepresentation(exportedContentType: .data) { file in
             SentTransferredFile(try file.write())
         }
         .suggestedFileName { $0.fileName }
