@@ -19,7 +19,7 @@ struct NewDeckView: View {
     @State private var pdfName: String?
     @State private var pdfPageCount = 0
     @State private var docLink = ""
-    @State private var selectedDoc: DriveDoc?
+    @State private var selectedDoc: DriveItem?
     @State private var isPickingDoc = false
     @State private var autoSync = true
     @State private var density: CardDensity = .balanced
@@ -31,8 +31,12 @@ struct NewDeckView: View {
         switch kind {
         case .text: !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .pdf: pdfData != nil
-        case .googleDoc: GoogleDocsClient.documentID(from: docLink) != nil
+        case .googleDoc: chosenDocumentID != nil
         }
+    }
+
+    private var chosenDocumentID: String? {
+        selectedDoc?.id ?? GoogleDocsClient.documentID(from: docLink)
     }
 
     var body: some View {
@@ -215,7 +219,7 @@ struct NewDeckView: View {
         }
     }
 
-    private func selectedDocRow(_ doc: DriveDoc) -> some View {
+    private func selectedDocRow(_ doc: DriveItem) -> some View {
         HStack(spacing: 12) {
             Button {
                 isPickingDoc = true
@@ -223,14 +227,17 @@ struct NewDeckView: View {
                 HStack(spacing: 12) {
                     Image(systemName: "doc.text.fill")
                         .font(.title2)
-                        .foregroundStyle(Color(red: 0.26, green: 0.52, blue: 0.96))
+                        .foregroundStyle(Color.docBlue)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(doc.name)
                             .foregroundStyle(.primary)
                             .lineLimit(2)
-                        Text("Tap to choose a different doc")
+                        Text(DriveText.modified(doc))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text("Tap to choose a different doc")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -285,7 +292,11 @@ struct NewDeckView: View {
             guard let pdfData else { return }
             source = .pdf(fileName: pdfName ?? "Document.pdf", data: pdfData)
         case .googleDoc:
-            source = .googleDoc(link: docLink, autoSync: autoSync)
+            guard let documentID = chosenDocumentID else {
+                errorMessage = GoogleDocsClient.DocsError.invalidLink.localizedDescription
+                return
+            }
+            source = .googleDoc(documentID: documentID, autoSync: autoSync)
         }
 
         isGenerating = true

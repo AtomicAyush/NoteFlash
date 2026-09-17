@@ -4,7 +4,7 @@ import SwiftData
 enum NewDeckSource {
     case text(title: String, notes: String)
     case pdf(fileName: String, data: Data)
-    case googleDoc(link: String, autoSync: Bool)
+    case googleDoc(documentID: String, autoSync: Bool)
 }
 
 /// Builds a new deck with the AI engine chosen in Settings.
@@ -65,10 +65,7 @@ enum DeckCreator {
             deck.sourcePDF = data
             return try insert(deck, cards: generated.cards, into: context)
 
-        case .googleDoc(let link, let autoSync):
-            guard let documentID = GoogleDocsClient.documentID(from: link) else {
-                throw GoogleDocsClient.DocsError.invalidLink
-            }
+        case .googleDoc(let documentID, let autoSync):
             let document = try await sync.fetchDocument(id: documentID)
             let notes = document.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !notes.isEmpty else { throw CreationError.emptyNotes }
@@ -83,7 +80,7 @@ enum DeckCreator {
                 density: density
             )
             deck.googleDocID = documentID
-            deck.googleDocURL = GoogleDocsClient.editURL(for: documentID)?.absoluteString ?? link
+            deck.googleDocURL = GoogleDocsClient.editURL(for: documentID)?.absoluteString
             deck.sourceHash = TextDiff.fingerprint(of: document.text)
             deck.autoSync = autoSync
             deck.lastCheckedAt = .now

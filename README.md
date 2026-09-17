@@ -4,7 +4,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
 
 ## Features
 
-- **Three ways to add notes:** type or paste text, import a PDF (scanned pages go through on-device text recognition), or add a Google Doc. You can pick the doc from a searchable list of your Drive or paste a link.
+- **Three ways to add notes:** type or paste text, import a PDF (scanned pages go through on-device text recognition), or add a Google Doc. Browse your Drive like the Drive app (My Drive folders, Shared, Starred, Recent), search by name or text, sort by name or date, switch between list and grid, and preview a doc before using it. You can also paste a link.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
 - **Google Doc sync:** linked docs are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect.
   - Cards you write or edit by hand are locked and never overwritten.
@@ -48,7 +48,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 | Data model (SwiftData) | `NoteFlash/Models` |
 | AI engines (shared protocol, Apple, Claude) | `NoteFlash/Services/Engines` |
 | Line diffing and section splitting | `TextDiff.swift`, `NoteChunker.swift` |
-| Google sign-in (OAuth + PKCE, no SDK), Docs reading, Drive doc list | `GoogleAuth.swift`, `GoogleDocsClient.swift`, `GoogleDriveClient.swift` |
+| Google sign-in (OAuth + PKCE, no SDK), Docs reading, Drive browsing | `GoogleAuth.swift`, `GoogleDocsClient.swift`, `GoogleDriveClient.swift`, `DriveDataSource.swift` |
+| Drive picker (folders, sort, grid, preview) | `NoteFlash/Views/DocPicker` |
 | Sync, note edits, regeneration | `DocSyncService.swift` |
 | Screens and study modes | `NoteFlash/Views` |
 
@@ -70,5 +71,5 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 
 ## Development notes
 
-- Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck.
+- Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive for the doc picker.
 - The on-device model's behavior varies from run to run, so check prompt changes against several kinds of notes.
