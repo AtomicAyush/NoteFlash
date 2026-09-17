@@ -13,6 +13,10 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
   - **Flashcards:** flip cards and swipe them into Know or Still learning.
   - **Learn:** rounds that start with multiple choice and move to typed or self-graded recall.
   - **Match:** a timed matching game with penalties for wrong matches and a best time.
+- **Background processing:** Generate closes right away and the deck list shows each job's progress and time left.
+  - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen.
+  - **When a job finishes in the background:** a notification lets you open the new deck.
+  - **Time estimates:** they learn how fast your device (or Claude) actually is.
 - **Deck tools:** stars, a "study starred only" filter, search, editing notes (text decks), regenerating a deck, and resetting progress.
 
 ## Requirements
@@ -67,9 +71,15 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
   - For added lines, it writes new cards, and near-duplicates of existing cards are dropped.
   - A card whose answer no longer appears anywhere in the notes is removed.
 
+**Background processing.** `ProcessingCenter` runs each job as an iOS continued-processing task (`BGContinuedProcessingTask`, iOS 26+).
+- **Live Activity:** the system shows it in the Dynamic Island and on the Lock Screen. The app updates its progress and subtitle ("About 40 sec left · Section 2 of 5").
+- **Fallback:** if iOS declines the request, the job runs in the app, with the usual short grace period after you leave.
+- **Time estimates:** `ProcessingEstimator` starts from a per-engine rate (seconds per 1,000 characters), blends in the observed pace as progress arrives, and saves the rate it measures when each job finishes.
+
 **Apple's cloud model (optional).** On iOS 27, `AppConfig.usePrivateCloudCompute` sends notes too long for one on-device request to Apple's larger Private Cloud Compute model. It needs the Private Cloud Compute managed entitlement from Apple ([details](https://developer.apple.com/private-cloud-compute/)), so it's off by default.
 
 ## Development notes
 
 - Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive for the doc picker.
 - The on-device model's behavior varies from run to run, so check prompt changes against several kinds of notes.
+- `-uiTesting` also swaps in a slow sample engine, so processing progress can be checked in the Simulator. The Simulator can't run continued-processing tasks or Apple's on-device model, so try the Live Activity on a real iPhone.

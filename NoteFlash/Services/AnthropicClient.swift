@@ -133,12 +133,14 @@ nonisolated struct AnthropicClient: Sendable {
     }
 
     /// Sends one message whose reply is constrained to `schema`, and decodes it as `T`.
+    /// `onTextProgress` receives the number of answer characters streamed so far.
     @concurrent
     func structuredResponse<T: Decodable & Sendable>(
         system: String,
         content: [ContentBlock],
         schema: JSONValue,
-        as type: T.Type
+        as type: T.Type,
+        onTextProgress: (@Sendable (Int) -> Void)? = nil
     ) async throws -> T {
         let body = RequestBody(
             model: model,
@@ -162,7 +164,7 @@ nonisolated struct AnthropicClient: Sendable {
         request.setValue(Self.fallbackBeta, forHTTPHeaderField: "anthropic-beta")
         request.httpBody = try encoder.encode(body)
 
-        let text = try await streamText(for: request)
+        let text = try await streamText(for: request, onTextProgress: onTextProgress)
         guard !text.isEmpty else { throw ClientError.emptyResponse }
         do {
             return try JSONDecoder().decode(T.self, from: Data(text.utf8))
@@ -184,7 +186,7 @@ nonisolated struct AnthropicClient: Sendable {
         }
     }
 
-    private func streamText(for request: URLRequest) async throws -> String {
+    private func streamText(for request: URLRequest, onTextProgress: (@Sendable (Int) -> Void)?) async throws -> String {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
@@ -195,6 +197,7 @@ nonisolated struct AnthropicClient: Sendable {
 
         let decoder = JSONDecoder()
         var text = ""
+        var reportedLength = 0
         var stopReason: String?
         for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }
@@ -205,6 +208,10 @@ nonisolated struct AnthropicClient: Sendable {
                 // Only text deltas carry the JSON answer; thinking and signature deltas are skipped.
                 if event.delta?.type == "text_delta", let chunk = event.delta?.text {
                     text += chunk
+                    if let onTextProgress, text.utf8.count - reportedLength >= 200 {
+                        reportedLength = text.utf8.count
+                        onTextProgress(reportedLength)
+                    }
                 }
             case "message_delta":
                 if let reason = event.delta?.stopReason { stopReason = reason }

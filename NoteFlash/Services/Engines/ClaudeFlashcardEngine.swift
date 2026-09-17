@@ -15,7 +15,7 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
         "back": .stringType,
     ])
 
-    func generateDeck(from source: NoteSource, density: CardDensity) async throws -> GeneratedDeck {
+    func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
         let system = """
             You turn a student's class notes into a flashcard deck for studying, like a well-made Quizlet set.
 
@@ -46,10 +46,37 @@ nonisolated struct ClaudeFlashcardEngine: FlashcardEngine {
             "title": .stringType,
             "cards": .arrayOf(Self.cardSchema),
         ])
+
+        // Claude thinks first, then streams the cards; progress follows the streamed length.
+        let expectedOutput = Self.expectedOutputCharacters(for: source, density: density)
+        progress?(GenerationProgress(fraction: 0.02, detail: "Claude is reading your notes"))
+        let onTextProgress: (@Sendable (Int) -> Void)? = progress.map { report in
+            { @Sendable streamed in
+                let share = min(1, Double(streamed) / expectedOutput)
+                report(GenerationProgress(fraction: 0.1 + 0.88 * share, detail: "Writing cards"))
+            }
+        }
         let deck = try await client.structuredResponse(
-            system: system, content: content, schema: schema, as: GeneratedDeck.self
+            system: system, content: content, schema: schema, as: GeneratedDeck.self,
+            onTextProgress: onTextProgress
         )
+        progress?(GenerationProgress(fraction: 1, detail: "Done"))
         return GeneratedDeck(title: deck.title, cards: CardWriting.cleaned(deck.cards))
+    }
+
+    /// Rough size of the JSON reply: roughly one card per 80 characters of notes at the balanced size.
+    private static func expectedOutputCharacters(for source: NoteSource, density: CardDensity) -> Double {
+        let input: Int
+        switch source {
+        case .text(let text): input = text.count
+        case .pdf(let data, let text): input = text.isEmpty ? data.count / 20 : text.count
+        }
+        let ratio = switch density {
+        case .essentials: 0.6
+        case .balanced: 1.2
+        case .thorough: 1.8
+        }
+        return max(400, Double(input) * ratio)
     }
 
     func reviseDeck(

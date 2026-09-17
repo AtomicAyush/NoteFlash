@@ -50,11 +50,25 @@ nonisolated enum NoteSource: Sendable {
     }
 }
 
+/// How far along an engine is with writing a deck.
+nonisolated struct GenerationProgress: Sendable {
+    /// Share of the AI work that's done, from 0 to 1.
+    var fraction: Double
+    /// Short status, e.g. "Section 2 of 5".
+    var detail: String
+}
+
+typealias GenerationProgressHandler = @Sendable (GenerationProgress) -> Void
+
 // MARK: - Engine
 
 /// Something that can write flashcards from notes and revise them when the notes change.
 nonisolated protocol FlashcardEngine: Sendable {
-    func generateDeck(from source: NoteSource, density: CardDensity) async throws -> GeneratedDeck
+    func generateDeck(
+        from source: NoteSource,
+        density: CardDensity,
+        progress: GenerationProgressHandler?
+    ) async throws -> GeneratedDeck
 
     func reviseDeck(
         existing: [ExistingCard],
@@ -84,13 +98,6 @@ nonisolated enum AIEngineKind: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var workingDescription: String {
-        switch self {
-        case .apple: "Apple Intelligence is reading your notes on this iPhone. Long notes are handled in sections."
-        case .claude: "Claude is reading your notes. Long notes can take a minute."
-        }
-    }
-
     /// Why this engine can't run right now, or nil when it's ready.
     var setupProblem: String? {
         switch self {
@@ -104,9 +111,12 @@ nonisolated enum AIEngineKind: String, CaseIterable, Identifiable, Sendable {
     }
 
     func makeEngine() throws -> any FlashcardEngine {
+        #if DEBUG
+        if UITestSupport.isEnabled { return SampleFlashcardEngine() }
+        #endif
         switch self {
-        case .apple: try AppleFlashcardEngine()
-        case .claude: ClaudeFlashcardEngine(client: try AnthropicClient.fromKeychain())
+        case .apple: return try AppleFlashcardEngine()
+        case .claude: return ClaudeFlashcardEngine(client: try AnthropicClient.fromKeychain())
         }
     }
 }

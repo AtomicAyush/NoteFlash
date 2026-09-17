@@ -29,15 +29,20 @@ enum DeckCreator {
         from source: NewDeckSource,
         density: CardDensity,
         sync: DocSyncService,
-        context: ModelContext
+        context: ModelContext,
+        reporter: ProcessingReporter = .silent
     ) async throws -> Deck {
-        let engine = try AIEngineKind.selected.makeEngine()
+        let engineKind = AIEngineKind.selected
+        let engine = try engineKind.makeEngine()
 
         switch source {
         case .text(let title, let notes):
             let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { throw CreationError.emptyNotes }
-            let generated = try await engine.generateDeck(from: .text(trimmed), density: density)
+            reporter.send(.workload(characters: trimmed.count, engine: engineKind))
+            let generated = try await engine.generateDeck(
+                from: .text(trimmed), density: density, progress: reporter.generationHandler
+            )
             let deckTitle = title.trimmingCharacters(in: .whitespaces)
             let deck = Deck(
                 title: deckTitle.isEmpty ? generated.title : deckTitle,
@@ -48,12 +53,20 @@ enum DeckCreator {
             return try insert(deck, cards: generated.cards, into: context)
 
         case .pdf(let fileName, let data):
-            guard let extracted = await PDFTextExtractor.extract(from: data) else {
-                throw CreationError.unreadablePDF
+            reporter.send(.phase("Reading your PDF"))
+            let extracted = await PDFTextExtractor.extract(from: data) { page, total in
+                reporter.send(.phase("Reading page \(page) of \(total)"))
             }
+            guard let extracted else { throw CreationError.unreadablePDF }
+            // Claude reads the PDF itself, so its workload follows the page count.
+            let characters = engineKind == .claude && data.count <= PDFTextExtractor.maxDocumentBytes
+                ? ProcessingEstimator.estimatedCharacters(pdfPages: extracted.pageCount)
+                : extracted.text.count
+            reporter.send(.workload(characters: characters, engine: engineKind))
             let generated = try await engine.generateDeck(
                 from: .pdf(data: data, text: extracted.text),
-                density: density
+                density: density,
+                progress: reporter.generationHandler
             )
             let deck = Deck(
                 title: generated.title,
@@ -66,10 +79,14 @@ enum DeckCreator {
             return try insert(deck, cards: generated.cards, into: context)
 
         case .googleDoc(let documentID, let autoSync):
+            reporter.send(.phase("Opening your Google Doc"))
             let document = try await sync.fetchDocument(id: documentID)
             let notes = document.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !notes.isEmpty else { throw CreationError.emptyNotes }
-            let generated = try await engine.generateDeck(from: .text(notes), density: density)
+            reporter.send(.workload(characters: notes.count, engine: engineKind))
+            let generated = try await engine.generateDeck(
+                from: .text(notes), density: density, progress: reporter.generationHandler
+            )
 
             let docTitle = document.title.flatMap { $0 == "Untitled document" ? nil : $0 }
             let deck = Deck(

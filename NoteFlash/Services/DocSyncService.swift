@@ -110,6 +110,11 @@ final class DocSyncService {
 
     /// Reads a doc through the Docs API when signed in, falling back to the public export link.
     func fetchDocument(id: String) async throws -> GoogleDocContent {
+        #if DEBUG
+        if UITestSupport.isEnabled {
+            return try await SampleDriveDataSource().document(id: id, auth: googleAuth)
+        }
+        #endif
         guard googleAuth.isSignedIn else {
             return try await GoogleDocsClient.fetchPublicExport(documentID: id)
         }
@@ -147,7 +152,7 @@ final class DocSyncService {
     }
 
     /// Rebuilds a deck from its source, keeping cards the user wrote or edited by hand.
-    func regenerate(_ deck: Deck) async throws {
+    func regenerate(_ deck: Deck, reporter: ProcessingReporter = .silent) async throws {
         try await exclusively(deck) {
             var notes = deck.sourceText
             let source: NoteSource
@@ -162,12 +167,20 @@ final class DocSyncService {
                 }
             case .googleDoc:
                 guard let documentID = deck.googleDocID else { return }
+                reporter.send(.phase("Opening your Google Doc"))
                 notes = try await fetchDocument(id: documentID).text
                 source = .text(notes)
             }
 
-            let engine = try AIEngineKind.selected.makeEngine()
-            let generated = try await engine.generateDeck(from: source, density: deck.density)
+            let engineKind = AIEngineKind.selected
+            let engine = try engineKind.makeEngine()
+            let characters = engineKind == .claude && deck.sourceKind == .pdf && notes.count < 200
+                ? (deck.sourcePDF.flatMap { PDFTextExtractor.pageCount(of: $0) }).map(ProcessingEstimator.estimatedCharacters(pdfPages:)) ?? notes.count
+                : notes.count
+            reporter.send(.workload(characters: characters, engine: engineKind))
+            let generated = try await engine.generateDeck(
+                from: source, density: deck.density, progress: reporter.generationHandler
+            )
             guard !deck.isGone else { throw SyncError.deckRemoved }
             guard !generated.cards.isEmpty else { throw DeckCreator.CreationError.noCards }
 

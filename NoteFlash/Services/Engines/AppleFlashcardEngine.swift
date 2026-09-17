@@ -142,7 +142,16 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
 
     // MARK: Generation
 
-    func generateDeck(from source: NoteSource, density: CardDensity) async throws -> GeneratedDeck {
+    /// What happened while writing one section, for progress reporting.
+    private enum SectionEvent {
+        case cards(Int)
+        case waiting
+    }
+
+    /// iOS limits on-device model use in the background; retry for about a minute before giving up.
+    private static let rateLimitRetries = 12
+
+    func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
         let notes = source.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !notes.isEmpty else { throw EngineError.noText }
         let instructions = Self.generationInstructions(density: density)
@@ -151,14 +160,22 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         do {
             // Notes too long for one on-device request can use Apple's larger cloud model, if enabled.
             if chunks.count > 1, AppConfig.usePrivateCloudCompute {
-                if #available(iOS 27.0, macOS 27.0, *), let deck = try? await generateWithCloudModel(notes, density: density) {
+                if #available(iOS 27.0, macOS 27.0, *),
+                   let deck = try? await generateWithCloudModel(notes, density: density, progress: progress) {
+                    progress?(GenerationProgress(fraction: 1, detail: "Done"))
                     return deck
                 }
             }
-            var deck = try await generate(chunks: chunks, density: density) { Self.onDeviceSession(instructions) }
-            if chunks.count > 1 || deck.title.isEmpty, let title = try? await Self.deckTitle(for: notes) {
-                deck = GeneratedDeck(title: title, cards: deck.cards)
+            var deck = try await generate(chunks: chunks, density: density, progress: progress) {
+                Self.onDeviceSession(instructions)
             }
+            if chunks.count > 1 || deck.title.isEmpty {
+                progress?(GenerationProgress(fraction: 0.98, detail: "Naming your deck"))
+                if let title = try? await Self.deckTitle(for: notes) {
+                    deck = GeneratedDeck(title: title, cards: deck.cards)
+                }
+            }
+            progress?(GenerationProgress(fraction: 1, detail: "Done"))
             return deck.title.isEmpty ? GeneratedDeck(title: "My Notes", cards: deck.cards) : deck
         } catch {
             throw Self.friendlyError(error)
@@ -166,13 +183,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     }
 
     @available(iOS 27.0, macOS 27.0, *)
-    private func generateWithCloudModel(_ notes: String, density: CardDensity) async throws -> GeneratedDeck? {
+    private func generateWithCloudModel(_ notes: String, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck? {
         let instructions = Self.generationInstructions(density: density)
         let cloud = PrivateCloudComputeLanguageModel()
         guard cloud.isAvailable else { return nil }
         let contextSize = try await cloud.contextSize
         let chunks = NoteChunker.chunks(of: notes, maxCharacters: Self.chunkCharacters(forContextSize: contextSize))
-        return try await generate(chunks: chunks, density: density) {
+        return try await generate(chunks: chunks, density: density, progress: progress) {
             LanguageModelSession(model: cloud, instructions: instructions)
         }
     }
@@ -180,19 +197,41 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     private func generate(
         chunks: [String],
         density: CardDensity,
+        progress: GenerationProgressHandler?,
         makeSession: () -> LanguageModelSession
     ) async throws -> GeneratedDeck {
         var title: String?
         var cards: [GeneratedCard] = []
         var blockedSections = 0
 
-        for chunk in chunks {
+        for (index, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
             let request = chunks.count > 1
                 ? "Write flashcards for this part of the student's notes. Cover every fact in it."
                 : "Write flashcards for the student's notes. Cover every fact in them."
+            let label = chunks.count > 1 ? "Section \(index + 1) of \(chunks.count)" : "Writing cards"
+            let expectedCards = Double(Self.estimatedCardCount(for: chunk, density: density))
+            // Sections share 97% of the bar; naming the deck takes the rest.
+            let report = { (withinSection: Double, detail: String) in
+                let overall = (Double(index) + min(max(withinSection, 0), 1)) / Double(chunks.count)
+                progress?(GenerationProgress(fraction: overall * 0.97, detail: detail))
+            }
+            report(0, label)
             do {
-                let section = try await sectionCards(for: chunk, request: request, density: density, makeSession: makeSession)
+                let section = try await sectionCards(
+                    for: chunk,
+                    request: request,
+                    density: density,
+                    onEvent: { event in
+                        switch event {
+                        case .cards(let count):
+                            report(min(0.95, Double(count) / expectedCards), label)
+                        case .waiting:
+                            report(0, "Waiting for Apple Intelligence")
+                        }
+                    },
+                    makeSession: makeSession
+                )
                 if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
                     title = sectionTitle
                 }
@@ -201,6 +240,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 // Skip a section the safety filter rejects rather than failing the whole deck.
                 blockedSections += 1
             }
+            report(1, label)
         }
 
         let cleaned = CardWriting.cleaned(cards)
@@ -222,42 +262,83 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         for text: String,
         request: String,
         density: CardDensity,
+        onEvent: (SectionEvent) -> Void,
         makeSession: () -> LanguageModelSession
     ) async throws -> SectionCards {
         let instructions = Self.generationInstructions(density: density)
+        let cap = Self.maximumCardCount(for: text, density: density)
         do {
-            let sets = try await cardSets(for: text, request: request, makeSession: makeSession)
-            var cards = sets.flatMap(\.cards).map(\.card)
+            let sets = try await cardSets(for: text, request: request, cap: cap, onEvent: onEvent, makeSession: makeSession)
+            var cards = Self.faithful(sets.flatMap(\.cards).map(\.card), to: text)
             // The model sometimes stops early; top up a thin section with a plain-text pass.
-            if cards.count < Self.expectedCardCount(for: text, density: density),
-               let extra = try? await plainTextCards(for: text, request: request, instructions: instructions) {
-                cards += extra.filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
+            if cards.count < Self.minimumCardCount(for: text, density: density) {
+                let found = cards.count
+                let extra = (try? await plainTextCards(
+                    for: text, request: request, instructions: instructions, cap: cap,
+                    onEvent: { event in
+                        if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
+                    }
+                )) ?? []
+                cards += Self.faithful(extra, to: text)
+                    .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
             }
-            return SectionCards(title: sets.first?.title, cards: cards)
+            return SectionCards(title: sets.first?.title, cards: Array(cards.prefix(cap)))
         } catch where AppleModelFailure(error) == .guardrail {
             var cards: [GeneratedCard] = []
-            for _ in 0..<2 where cards.count < Self.expectedCardCount(for: text, density: density) {
-                let extra = (try? await plainTextCards(for: text, request: request, instructions: instructions)) ?? []
-                cards += extra.filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
+            for _ in 0..<2 where cards.count < Self.minimumCardCount(for: text, density: density) {
+                let found = cards.count
+                let extra = (try? await plainTextCards(
+                    for: text, request: request, instructions: instructions, cap: cap,
+                    onEvent: { event in
+                        if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
+                    }
+                )) ?? []
+                cards += Self.faithful(extra, to: text)
+                    .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
             }
             guard !cards.isEmpty else { throw error }
-            return SectionCards(title: nil, cards: cards)
+            return SectionCards(title: nil, cards: Array(cards.prefix(cap)))
         }
     }
 
-    /// Rough lower bound on cards for a section: a share of its sentences, by deck size.
-    private static func expectedCardCount(for text: String, density: CardDensity) -> Int {
-        let sentences = TextDiff.lines(of: text)
+    private static func sentenceCount(in text: String) -> Int {
+        TextDiff.lines(of: text)
             .filter { !$0.hasPrefix("#") && !$0.hasPrefix("(Continuing") }
             .reduce(0) { count, line in
                 count + max(1, line.split(whereSeparator: { ".!?".contains($0) }).filter { $0.count > 12 }.count)
             }
+    }
+
+    /// Rough lower bound on cards for a section, below which it gets a second pass.
+    private static func minimumCardCount(for text: String, density: CardDensity) -> Int {
         let share = switch density {
         case .essentials: 0.25
         case .balanced: 0.5
         case .thorough: 0.75
         }
-        return Int((Double(sentences) * share).rounded(.down))
+        return Int((Double(sentenceCount(in: text)) * share).rounded(.down))
+    }
+
+    /// Typical number of cards for a section, used to report progress while it's written.
+    private static func estimatedCardCount(for text: String, density: CardDensity) -> Int {
+        let share = switch density {
+        case .essentials: 0.4
+        case .balanced: 0.9
+        case .thorough: 1.2
+        }
+        return max(1, Int((Double(sentenceCount(in: text)) * share).rounded()))
+    }
+
+    /// Most cards worth keeping from a section. The small model sometimes loops, inventing
+    /// endless variations ("How does X affect plant growth / height / roots…").
+    private static func maximumCardCount(for text: String, density: CardDensity) -> Int {
+        max(4, estimatedCardCount(for: text, density: density) * 2)
+    }
+
+    /// Drops cards whose answer shares no key words with the notes, which catches invented facts.
+    private static func faithful(_ cards: [GeneratedCard], to notes: String) -> [GeneratedCard] {
+        let noteWords = CardMatcher.keywords(in: notes)
+        return cards.filter { !CardMatcher.isAnswerMissing($0.back, fromNoteWords: noteWords) }
     }
 
     private static let permissiveModel = SystemLanguageModel(guardrails: .permissiveContentTransformations)
@@ -266,7 +347,10 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         for text: String,
         request: String,
         instructions: String,
-        depth: Int = 0
+        cap: Int,
+        depth: Int = 0,
+        attempt: Int = 0,
+        onEvent: (SectionEvent) -> Void
     ) async throws -> [GeneratedCard] {
         let session = LanguageModelSession(
             model: Self.permissiveModel,
@@ -280,15 +364,42 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 """
         )
         do {
-            let response = try await session.respond(to: "\(request)\n\nNOTES:\n\(text)", options: Self.options)
-            return Self.parsePlainTextCards(response.content)
+            var latest = ""
+            let stream = session.streamResponse(to: "\(request)\n\nNOTES:\n\(text)", options: Self.options)
+            for try await snapshot in stream {
+                latest = snapshot.content
+                let count = Self.answerCount(in: latest)
+                onEvent(.cards(count))
+                if count > cap { break }
+            }
+            return Array(Self.parsePlainTextCards(latest).prefix(cap))
+        } catch where AppleModelFailure(error) == .rateLimited && attempt < Self.rateLimitRetries {
+            onEvent(.waiting)
+            try await Task.sleep(for: .seconds(5))
+            return try await plainTextCards(
+                for: text, request: request, instructions: instructions,
+                cap: cap, depth: depth, attempt: attempt + 1, onEvent: onEvent
+            )
         } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
             var cards: [GeneratedCard] = []
             for half in NoteChunker.halves(of: text) where half != text {
-                cards += try await plainTextCards(for: half, request: request, instructions: instructions, depth: depth + 1)
+                let found = cards.count
+                cards += try await plainTextCards(
+                    for: half, request: request, instructions: instructions, cap: cap, depth: depth + 1,
+                    onEvent: { event in
+                        if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
+                    }
+                )
             }
             return cards
         }
+    }
+
+    private static func answerCount(in text: String) -> Int {
+        text.components(separatedBy: .newlines).filter { line in
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \t*-•"))
+            return trimmed.hasPrefix("A:") || trimmed.lowercased().hasPrefix("answer:")
+        }.count
     }
 
     /// Parses "Q: … / A: …" pairs, tolerating list markers and bold markup.
@@ -317,12 +428,16 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         return nil
     }
 
-    /// Generates cards for one section, halving it if the model runs past its context window
-    /// (the small model occasionally rambles even on short notes).
+    /// Generates cards for one section, streaming so progress can be reported. Halves the
+    /// section if the model runs past its context window (the small model occasionally
+    /// rambles even on short notes), and waits out background rate limits.
     private func cardSets(
         for text: String,
         request: String,
+        cap: Int,
         depth: Int = 0,
+        attempt: Int = 0,
+        onEvent: (SectionEvent) -> Void,
         makeSession: () -> LanguageModelSession
     ) async throws -> [AppleCardSet] {
         let prompt = """
@@ -332,14 +447,45 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             \(text)
             """
         do {
-            let response = try await makeSession().respond(to: prompt, generating: AppleCardSet.self, options: Self.options)
-            return [response.content]
+            let stream = makeSession().streamResponse(to: prompt, generating: AppleCardSet.self, options: Self.options)
+            var latest: GeneratedContent?
+            for try await snapshot in stream {
+                latest = snapshot.rawContent
+                let partialCards = snapshot.content.cards ?? []
+                onEvent(.cards(partialCards.count))
+                if partialCards.count > cap {
+                    // Stop a runaway response and keep the cards written so far (all but the last are complete).
+                    let complete = partialCards.prefix(cap).compactMap { partial -> AppleCard? in
+                        guard let question = partial.question, let answer = partial.answer else { return nil }
+                        return AppleCard(fact: partial.fact ?? "", question: question, answer: answer)
+                    }
+                    return [AppleCardSet(title: snapshot.content.title ?? "", cards: complete)]
+                }
+            }
+            if let latest, let set = try? AppleCardSet(latest) {
+                return [set]
+            }
+            return [try await stream.collect().content]
+        } catch where AppleModelFailure(error) == .rateLimited && attempt < Self.rateLimitRetries {
+            onEvent(.waiting)
+            try await Task.sleep(for: .seconds(5))
+            return try await cardSets(
+                for: text, request: request, cap: cap, depth: depth, attempt: attempt + 1,
+                onEvent: onEvent, makeSession: makeSession
+            )
         } catch where AppleModelFailure(error) == .contextExceeded && depth < 3 {
             let halves = NoteChunker.halves(of: text)
             guard halves.count > 1 else { throw error }
             var sets: [AppleCardSet] = []
             for half in halves {
-                sets += try await cardSets(for: half, request: request, depth: depth + 1, makeSession: makeSession)
+                let found = sets.reduce(0) { $0 + $1.cards.count }
+                sets += try await cardSets(
+                    for: half, request: request, cap: cap, depth: depth + 1,
+                    onEvent: { event in
+                        if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
+                    },
+                    makeSession: makeSession
+                )
             }
             return sets
         }
@@ -497,9 +643,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         }
 
         let instructions = Self.generationInstructions(density: density)
-        let section = try await sectionCards(for: added.joined(separator: "\n"), request: request, density: density) {
-            Self.onDeviceSession(instructions)
-        }
+        let section = try await sectionCards(
+            for: added.joined(separator: "\n"),
+            request: request,
+            density: density,
+            onEvent: { _ in },
+            makeSession: { Self.onDeviceSession(instructions) }
+        )
         revision.added += section.cards
     }
 

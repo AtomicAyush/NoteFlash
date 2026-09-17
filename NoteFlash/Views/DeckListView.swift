@@ -4,12 +4,12 @@ import SwiftUI
 struct DeckListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(DocSyncService.self) private var sync
+    @Environment(ProcessingCenter.self) private var processing
     @Query(sort: \Deck.updatedAt, order: .reverse) private var decks: [Deck]
 
     @State private var path: [Deck] = []
     @State private var showingNewDeck = false
     @State private var showingSettings = false
-    @State private var createdDeck: Deck?
     @State private var searchText = ""
     @State private var hasAPIKey = KeychainStore.string(for: .anthropicAPIKey) != nil
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
@@ -50,6 +50,16 @@ struct DeckListView: View {
                     }
                 }
 
+                if !processing.jobs.isEmpty {
+                    Section {
+                        ForEach(processing.jobs) { job in
+                            ProcessingJobRow(job: job, onOpen: openDeck)
+                        }
+                    } header: {
+                        Text("Making Flashcards")
+                    }
+                }
+
                 ForEach(filteredDecks) { deck in
                     NavigationLink(value: deck) {
                         DeckRow(deck: deck)
@@ -58,7 +68,7 @@ struct DeckListView: View {
                 .onDelete(perform: deleteDecks)
             }
             .overlay {
-                if decks.isEmpty {
+                if decks.isEmpty && processing.jobs.isEmpty {
                     ContentUnavailableView {
                         Label("No Decks Yet", systemImage: "rectangle.stack.badge.plus")
                     } description: {
@@ -92,21 +102,28 @@ struct DeckListView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingNewDeck, onDismiss: openCreatedDeck) {
-                NewDeckView { deck in
-                    createdDeck = deck
-                }
+            .sheet(isPresented: $showingNewDeck) {
+                NewDeckView()
             }
             .sheet(isPresented: $showingSettings, onDismiss: refreshKeyState) {
                 SettingsView()
             }
+            .onChange(of: AppRouter.shared.deckToOpen, initial: true) { _, deckID in
+                guard let deckID else { return }
+                AppRouter.shared.deckToOpen = nil
+                if let job = processing.jobs.first(where: { $0.deckID == deckID && !$0.isRunning }) {
+                    processing.dismiss(job)
+                }
+                openDeck(deckID)
+            }
         }
     }
 
-    private func openCreatedDeck() {
-        guard let deck = createdDeck else { return }
-        createdDeck = nil
-        path.append(deck)
+    private func openDeck(_ id: UUID) {
+        guard let deck = decks.first(where: { $0.id == id }) else { return }
+        showingNewDeck = false
+        showingSettings = false
+        path = [deck]
     }
 
     private func refreshKeyState() {

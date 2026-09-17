@@ -5,7 +5,7 @@ import UIKit
 
 /// Launch-argument hooks for UI tests: `-uiTesting` uses an in-memory store seeded with a sample deck.
 enum UITestSupport {
-    static var isEnabled: Bool {
+    nonisolated static var isEnabled: Bool {
         ProcessInfo.processInfo.arguments.contains("-uiTesting")
     }
 
@@ -38,6 +38,29 @@ enum UITestSupport {
         }
         deck.cards.first?.setBadge(.new)
         try? context.save()
+    }
+}
+
+/// Writes placeholder cards slowly, so processing progress can be checked in the Simulator
+/// (where Apple's on-device model can't run).
+nonisolated struct SampleFlashcardEngine: FlashcardEngine {
+    func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
+        let lines = TextDiff.lines(of: source.text).filter { !$0.hasPrefix("#") }
+        let sections = max(1, min(4, lines.count / 3))
+        let steps = 24
+        for step in 0..<steps {
+            try await Task.sleep(for: .milliseconds(750))
+            let section = min(sections, step * sections / steps + 1)
+            progress?(GenerationProgress(fraction: Double(step + 1) / Double(steps), detail: "Section \(section) of \(sections)"))
+        }
+        let cards = lines.map { line in
+            GeneratedCard(front: "What do the notes say about “\(line.prefix(30))”?", back: line)
+        }
+        return GeneratedDeck(title: "Sample Deck", cards: cards)
+    }
+
+    func reviseDeck(existing: [ExistingCard], changes: NoteChanges, updatedNotes: String, density: CardDensity) async throws -> DeckRevision {
+        DeckRevision(updated: [], removed: [], added: [])
     }
 }
 

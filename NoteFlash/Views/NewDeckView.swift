@@ -3,11 +3,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct NewDeckView: View {
-    var onCreated: (Deck) -> Void
-
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-    @Environment(DocSyncService.self) private var sync
+    @Environment(ProcessingCenter.self) private var processing
     @Environment(GoogleAuth.self) private var googleAuth
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
     @Query private var decks: [Deck]
@@ -24,7 +21,6 @@ struct NewDeckView: View {
     @State private var autoSync = true
     @State private var density: CardDensity = .balanced
     @State private var isImportingPDF = false
-    @State private var isGenerating = false
     @State private var errorMessage: String?
 
     private var canGenerate: Bool {
@@ -68,7 +64,14 @@ struct NewDeckView: View {
                 } header: {
                     Text("Cards")
                 } footer: {
-                    Text("\(density.promptGuidance)\n\nCards are written by \(engine.label). You can change this in Settings.")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(density.promptGuidance)
+                        if let estimate = estimatedSeconds {
+                            Label("Estimated time: \(ETAText.estimate(estimate))", systemImage: "clock")
+                                .foregroundStyle(.primary)
+                        }
+                        Text("Cards are written by \(engine.label). Processing keeps going if you leave NoteFlash, and you can follow it in the Dynamic Island.")
+                    }
                 }
 
                 if let errorMessage {
@@ -86,9 +89,9 @@ struct NewDeckView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Generate", systemImage: "sparkles") {
-                        Task { await generate() }
+                        generate()
                     }
-                    .disabled(!canGenerate || isGenerating)
+                    .disabled(!canGenerate)
                 }
             }
             .fileImporter(isPresented: $isImportingPDF, allowedContentTypes: [.pdf], onCompletion: importPDF)
@@ -98,16 +101,6 @@ struct NewDeckView: View {
                     docLink = doc.editURL
                 }
             }
-            .overlay {
-                if isGenerating {
-                    WorkingOverlay(
-                        title: "Writing flashcards…",
-                        subtitle: engine.workingDescription
-                    )
-                }
-            }
-            .animation(.default, value: isGenerating)
-            .interactiveDismissDisabled(isGenerating)
         }
     }
 
@@ -283,36 +276,53 @@ struct NewDeckView: View {
         }
     }
 
-    private func generate() async {
-        let source: NewDeckSource
+    /// Rough processing time for typed notes or a PDF (a Google Doc's length isn't known yet).
+    private var estimatedSeconds: TimeInterval? {
+        let characters: Int
         switch kind {
         case .text:
-            source = .text(title: title, notes: notes)
+            characters = notes.trimmingCharacters(in: .whitespacesAndNewlines).count
+            guard characters > 0 else { return nil }
+        case .pdf:
+            guard pdfData != nil else { return nil }
+            characters = ProcessingEstimator.estimatedCharacters(pdfPages: pdfPageCount)
+        case .googleDoc:
+            return nil
+        }
+        return ProcessingEstimator.expectedDuration(engine: engine, characters: characters)
+    }
+
+    private func generate() {
+        errorMessage = nil
+        if let problem = engine.setupProblem {
+            errorMessage = problem
+            return
+        }
+
+        let source: NewDeckSource
+        let jobTitle: String
+        switch kind {
+        case .text:
+            let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
+            source = .text(title: trimmedTitle, notes: notes)
+            let firstLine = TextDiff.lines(of: notes).first?
+                .trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+            jobTitle = trimmedTitle.isEmpty ? String((firstLine ?? "Your notes").prefix(40)) : trimmedTitle
         case .pdf:
             guard let pdfData else { return }
-            source = .pdf(fileName: pdfName ?? "Document.pdf", data: pdfData)
+            let name = pdfName ?? "Document.pdf"
+            source = .pdf(fileName: name, data: pdfData)
+            jobTitle = (name as NSString).deletingPathExtension
         case .googleDoc:
             guard let documentID = chosenDocumentID else {
                 errorMessage = GoogleDocsClient.DocsError.invalidLink.localizedDescription
                 return
             }
             source = .googleDoc(documentID: documentID, autoSync: autoSync)
+            jobTitle = selectedDoc?.name ?? "Google Doc"
         }
 
-        isGenerating = true
-        errorMessage = nil
-        defer { isGenerating = false }
-        do {
-            let deck = try await DeckCreator.createDeck(
-                from: source,
-                density: density,
-                sync: sync,
-                context: modelContext
-            )
-            onCreated(deck)
-            dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        processing.startNewDeck(from: source, density: density, title: jobTitle)
+        dismiss()
     }
 }

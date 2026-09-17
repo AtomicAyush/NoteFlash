@@ -6,6 +6,7 @@ struct DeckDetailView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(DocSyncService.self) private var sync
+    @Environment(ProcessingCenter.self) private var processing
 
     @State private var studyMode: StudyMode?
     @State private var starredOnly = false
@@ -22,6 +23,7 @@ struct DeckDetailView: View {
     private var cards: [Flashcard] { deck.sortedCards }
     private var starredCards: [Flashcard] { cards.filter(\.isStarred) }
     private var isBusy: Bool { sync.isBusy(deck) }
+    private var regenerationJob: ProcessingJob? { processing.runningJob(forDeck: deck.id) }
 
     private var studyCards: [Flashcard] {
         starredOnly && !starredCards.isEmpty ? starredCards : cards
@@ -29,6 +31,14 @@ struct DeckDetailView: View {
 
     var body: some View {
         List {
+            if let regenerationJob {
+                Section {
+                    ProcessingJobRow(job: regenerationJob)
+                } header: {
+                    Text("Rewriting Cards")
+                }
+            }
+
             Section {
                 sourceRow
                 if deck.isLinkedToGoogleDoc {
@@ -89,7 +99,7 @@ struct DeckDetailView: View {
             if deck.isLinkedToGoogleDoc { await checkDoc() }
         }
         .overlay {
-            if isBusy {
+            if isBusy && regenerationJob == nil {
                 WorkingOverlay(title: "Updating cards…", subtitle: "\(AIEngineKind.selected.label) is revising this deck.")
             }
         }
@@ -119,7 +129,11 @@ struct DeckDetailView: View {
         }
         .confirmationDialog("Regenerate all cards?", isPresented: $isConfirmingRegenerate, titleVisibility: .visible) {
             Button("Regenerate", role: .destructive) {
-                Task { await run { try await sync.regenerate(deck) } }
+                if let problem = AIEngineKind.selected.setupProblem {
+                    errorMessage = problem
+                } else {
+                    processing.regenerate(deck)
+                }
             }
         } message: {
             Text("\(AIEngineKind.selected.label) will rewrite the deck from its notes. Cards you wrote or edited are kept; study progress on the others is reset.")
@@ -240,7 +254,7 @@ struct DeckDetailView: View {
                 .pickerStyle(.menu)
                 Divider()
                 Button("Regenerate Cards", systemImage: "sparkles") { isConfirmingRegenerate = true }
-                    .disabled(isBusy)
+                    .disabled(isBusy || regenerationJob != nil)
                 Button("Reset Progress", systemImage: "arrow.counterclockwise") { isConfirmingReset = true }
             }
         }

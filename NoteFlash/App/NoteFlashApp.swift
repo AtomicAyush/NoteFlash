@@ -3,9 +3,11 @@ import SwiftData
 
 @main
 struct NoteFlashApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     private let container: ModelContainer
     @State private var googleAuth: GoogleAuth
     @State private var syncService: DocSyncService
+    @State private var processing: ProcessingCenter
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -27,9 +29,11 @@ struct NoteFlashApp: App {
         if UITestSupport.isEnabled { UITestSupport.seed(container.mainContext) }
         #endif
         let auth = GoogleAuth()
+        let sync = DocSyncService(container: container, googleAuth: auth)
         self.container = container
         _googleAuth = State(initialValue: auth)
-        _syncService = State(initialValue: DocSyncService(container: container, googleAuth: auth))
+        _syncService = State(initialValue: sync)
+        _processing = State(initialValue: ProcessingCenter(container: container, sync: sync))
     }
 
     var body: some Scene {
@@ -37,6 +41,7 @@ struct NoteFlashApp: App {
             DeckListView()
                 .environment(googleAuth)
                 .environment(syncService)
+                .environment(processing)
         }
         .modelContainer(container)
         .onChange(of: scenePhase, initial: true) { _, phase in

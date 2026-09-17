@@ -22,8 +22,9 @@ nonisolated enum PDFTextExtractor {
     }
 
     /// Extracts the PDF's text, using on-device text recognition for scanned pages.
+    /// `onPage` is called with (pages done, total pages).
     @concurrent
-    static func extract(from data: Data) async -> Result? {
+    static func extract(from data: Data, onPage: (@Sendable (Int, Int) -> Void)? = nil) async -> Result? {
         guard let document = PDFDocument(data: data) else { return nil }
         var pages: [String] = []
         var recognized = 0
@@ -35,6 +36,7 @@ nonisolated enum PDFTextExtractor {
                 recognized += 1
             }
             if !text.isEmpty { pages.append(text) }
+            onPage?(index + 1, document.pageCount)
         }
         return Result(text: pages.joined(separator: "\n\n"), pageCount: document.pageCount, recognizedPageCount: recognized)
     }
