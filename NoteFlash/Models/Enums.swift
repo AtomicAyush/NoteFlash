@@ -1,9 +1,14 @@
 import Foundation
 
-nonisolated enum SourceKind: String, CaseIterable, Identifiable, Sendable {
+/// Where a deck's notes came from.
+nonisolated enum SourceKind: String, Identifiable, Sendable {
     case text
     case pdf
+    case powerPoint
     case googleDoc
+    case googleSlides
+    case drivePDF
+    case drivePowerPoint
 
     var id: String { rawValue }
 
@@ -11,15 +16,32 @@ nonisolated enum SourceKind: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .text: "Text"
         case .pdf: "PDF"
+        case .powerPoint: "PowerPoint"
         case .googleDoc: "Google Doc"
+        case .googleSlides: "Google Slides"
+        case .drivePDF: "PDF in Google Drive"
+        case .drivePowerPoint: "PowerPoint in Google Drive"
         }
     }
 
     var systemImage: String {
         switch self {
         case .text: "text.alignleft"
-        case .pdf: "doc.richtext"
-        case .googleDoc: "link"
+        case .pdf, .drivePDF: "doc.richtext"
+        case .powerPoint, .drivePowerPoint: "rectangle.on.rectangle"
+        case .googleDoc: "doc.text"
+        case .googleSlides: "rectangle.on.rectangle.angled"
+        }
+    }
+
+    /// The Drive file type for decks linked to Google Drive.
+    var driveFileKind: DriveFileKind? {
+        switch self {
+        case .text, .pdf, .powerPoint: nil
+        case .googleDoc: .document
+        case .googleSlides: .presentation
+        case .drivePDF: .pdf
+        case .drivePowerPoint: .powerPoint
         }
     }
 }
@@ -52,7 +74,7 @@ nonisolated enum CardDensity: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Marks cards that a Google Doc sync or notes edit changed recently.
+/// Marks cards that a Google Drive sync or notes edit changed recently.
 nonisolated enum SyncBadge: String, Sendable {
     case new
     case updated

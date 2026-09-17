@@ -3,8 +3,9 @@ import SwiftData
 
 enum NewDeckSource {
     case text(title: String, notes: String)
-    case pdf(fileName: String, data: Data)
-    case googleDoc(documentID: String, autoSync: Bool)
+    /// A PDF or PowerPoint file from Files.
+    case file(fileName: String, data: Data)
+    case drive(DriveFileReference, autoSync: Bool)
 }
 
 /// Builds a new deck with the AI engine chosen in Settings.
@@ -12,6 +13,7 @@ enum DeckCreator {
     enum CreationError: LocalizedError {
         case emptyNotes
         case unreadablePDF
+        case unsupportedFile
         case pdfTooLarge
         case noCards
 
@@ -19,6 +21,7 @@ enum DeckCreator {
             switch self {
             case .emptyNotes: "There aren't any notes to make cards from."
             case .unreadablePDF: "That file couldn't be opened as a PDF."
+            case .unsupportedFile: "NoteFlash can read PDFs and PowerPoint (.pptx) files."
             case .pdfTooLarge: "That PDF is too large and has no selectable text. Try splitting it into smaller files."
             case .noCards: "Couldn't find anything in these notes to make flashcards from."
             }
@@ -52,17 +55,34 @@ enum DeckCreator {
             )
             return try insert(deck, cards: generated.cards, into: context)
 
-        case .pdf(let fileName, let data):
+        case .file(let fileName, let data) where PowerPointTextExtractor.isPresentation(data):
+            reporter.send(.phase("Reading your slides"))
+            let slides = try await readPowerPoint(data)
+            let notes = slides.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !notes.isEmpty else { throw CreationError.emptyNotes }
+            reporter.send(.workload(characters: notes.count, engine: engineKind))
+            let generated = try await engine.generateDeck(
+                from: .text(notes), density: density, progress: reporter.generationHandler
+            )
+            let deck = Deck(
+                title: generated.title,
+                sourceKind: .powerPoint,
+                sourceName: fileName,
+                sourceText: notes,
+                density: density
+            )
+            return try insert(deck, cards: generated.cards, into: context)
+
+        case .file(let fileName, let data):
+            guard data.starts(with: Data("%PDF".utf8)) || PDFTextExtractor.pageCount(of: data) != nil else {
+                throw CreationError.unsupportedFile
+            }
             reporter.send(.phase("Reading your PDF"))
             let extracted = await PDFTextExtractor.extract(from: data) { page, total in
                 reporter.send(.phase("Reading page \(page) of \(total)"))
             }
             guard let extracted else { throw CreationError.unreadablePDF }
-            // Claude reads the PDF itself, so its workload follows the page count.
-            let characters = engineKind == .claude && data.count <= PDFTextExtractor.maxDocumentBytes
-                ? ProcessingEstimator.estimatedCharacters(pdfPages: extracted.pageCount)
-                : extracted.text.count
-            reporter.send(.workload(characters: characters, engine: engineKind))
+            reporter.send(.workload(characters: workload(forPDF: data, pages: extracted.pageCount, text: extracted.text, engine: engineKind), engine: engineKind))
             let generated = try await engine.generateDeck(
                 from: .pdf(data: data, text: extracted.text),
                 density: density,
@@ -78,31 +98,53 @@ enum DeckCreator {
             deck.sourcePDF = data
             return try insert(deck, cards: generated.cards, into: context)
 
-        case .googleDoc(let documentID, let autoSync):
-            reporter.send(.phase("Opening your Google Doc"))
-            let document = try await sync.fetchDocument(id: documentID)
-            let notes = document.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .drive(let reference, let autoSync):
+            reporter.send(.phase("Opening \(reference.kind?.label ?? "your file")"))
+            let content = try await sync.fetchContent(reference, reporter: reporter)
+            let notes = content.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !notes.isEmpty else { throw CreationError.emptyNotes }
-            reporter.send(.workload(characters: notes.count, engine: engineKind))
+
+            let noteSource: NoteSource
+            if let pdf = content.pdfData {
+                noteSource = .pdf(data: pdf, text: content.text)
+                reporter.send(.workload(characters: workload(forPDF: pdf, pages: content.pageCount ?? 0, text: content.text, engine: engineKind), engine: engineKind))
+            } else {
+                noteSource = .text(notes)
+                reporter.send(.workload(characters: notes.count, engine: engineKind))
+            }
             let generated = try await engine.generateDeck(
-                from: .text(notes), density: density, progress: reporter.generationHandler
+                from: noteSource, density: density, progress: reporter.generationHandler
             )
 
-            let docTitle = document.title.flatMap { $0 == "Untitled document" ? nil : $0 }
+            let fileTitle = content.title.flatMap { ["Untitled document", "Untitled presentation", ""].contains($0) ? nil : $0 }
             let deck = Deck(
-                title: docTitle ?? generated.title,
-                sourceKind: .googleDoc,
-                sourceName: document.title,
-                sourceText: document.text,
+                title: fileTitle ?? generated.title,
+                sourceKind: content.kind.sourceKind,
+                sourceName: content.title,
+                sourceText: content.text,
                 density: density
             )
-            deck.googleDocID = documentID
-            deck.googleDocURL = GoogleDocsClient.editURL(for: documentID)?.absoluteString
-            deck.sourceHash = TextDiff.fingerprint(of: document.text)
+            deck.googleDocID = reference.id
+            deck.googleDocURL = content.kind.openURL(for: reference.id)?.absoluteString
+            deck.sourceHash = TextDiff.fingerprint(of: content.text)
+            deck.sourceVersion = content.version
+            deck.sourcePDF = content.pdfData
             deck.autoSync = autoSync
             deck.lastCheckedAt = .now
             return try insert(deck, cards: generated.cards, into: context)
         }
+    }
+
+    /// Claude reads a PDF itself, so its workload follows the page count.
+    static func workload(forPDF data: Data, pages: Int, text: String, engine: AIEngineKind) -> Int {
+        engine == .claude && data.count <= PDFTextExtractor.maxDocumentBytes && pages > 0
+            ? ProcessingEstimator.estimatedCharacters(pdfPages: pages)
+            : text.count
+    }
+
+    @concurrent
+    private static func readPowerPoint(_ data: Data) async throws -> PowerPointTextExtractor.Result {
+        try PowerPointTextExtractor.extract(from: data)
     }
 
     private static func insert(_ deck: Deck, cards: [GeneratedCard], into context: ModelContext) throws -> Deck {

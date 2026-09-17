@@ -12,7 +12,7 @@ final class ProcessingJob: Identifiable {
         case newDeck(NewDeckSource, CardDensity)
         case regenerate(deckID: UUID)
         case updateNotes(deckID: UUID, text: String)
-        case syncDoc(deckID: UUID, text: String)
+        case syncDoc(deckID: UUID, content: DriveFileContent)
     }
 
     enum State: Equatable {
@@ -105,8 +105,8 @@ final class ProcessingCenter {
     init(container: ModelContainer, sync: DocSyncService) {
         self.container = container
         self.sync = sync
-        sync.onDocChanged = { [weak self] deck, document in
-            self?.updateFromDoc(deck, text: document.text)
+        sync.onDocChanged = { [weak self] deck, content in
+            self?.updateFromFile(deck, content: content)
         }
     }
 
@@ -139,7 +139,7 @@ final class ProcessingCenter {
         launch(ProcessingJob(kind: .updateNotes(deckID: deck.id, text: text), title: deck.title))
     }
 
-    private func updateFromDoc(_ deck: Deck, text: String) {
+    private func updateFromFile(_ deck: Deck, content: DriveFileContent) {
         guard runningJob(forDeck: deck.id) == nil else { return }
         let earlier = jobs.filter { job in
             if case .syncDoc(let deckID, _) = job.kind { return deckID == deck.id }
@@ -147,7 +147,7 @@ final class ProcessingCenter {
         }
         // Don't retry the same doc text over and over; the failed row has a Retry button.
         if earlier.contains(where: { job in
-            if case .syncDoc(_, let earlierText) = job.kind, case .failed = job.state { return earlierText == text }
+            if case .syncDoc(_, let earlier) = job.kind, case .failed = job.state { return earlier.text == content.text }
             return false
         }) {
             return
@@ -155,7 +155,7 @@ final class ProcessingCenter {
         // A newer version of the doc replaces an earlier failed or paused attempt.
         let replaced = Set(earlier.map(\.id))
         jobs.removeAll { replaced.contains($0.id) }
-        launch(ProcessingJob(kind: .syncDoc(deckID: deck.id, text: text), title: deck.title))
+        launch(ProcessingJob(kind: .syncDoc(deckID: deck.id, content: content), title: deck.title))
     }
 
     func cancel(_ job: ProcessingJob) {
@@ -344,9 +344,9 @@ final class ProcessingCenter {
             let deck = try fetchDeck(deckID)
             let summary = try await sync.updateNotes(of: deck, to: text, reporter: reporter)
             return (deck.id, summary)
-        case .syncDoc(let deckID, let text):
+        case .syncDoc(let deckID, let content):
             let deck = try fetchDeck(deckID)
-            try await sync.applyDocChange(to: deck, text: text, reporter: reporter)
+            try await sync.applyDocChange(to: deck, content: content, reporter: reporter)
             return (deck.id, deck.lastSyncSummary ?? "Up to date")
         }
     }

@@ -17,8 +17,11 @@ nonisolated enum AppConfig {
     /// Must match BGTaskSchedulerPermittedIdentifiers in NoteFlash-Info.plist.
     static let backgroundRefreshTaskID = "com.ayushkansal.NoteFlash.docsync"
 
-    /// How often linked Google Docs are checked while the app is open.
+    /// How often linked Google Drive files are checked while the app is open.
     static let foregroundSyncInterval: Duration = .seconds(120)
+    /// Shared-by-link Slides, PDFs, and PowerPoint files are downloaded in full to check them, so
+    /// they're checked less often unless the user taps Check Now.
+    static let publicFileSyncInterval: TimeInterval = 15 * 60
 
     /// Earliest time iOS may wake the app to check linked Google Docs in the background.
     static let backgroundRefreshInterval: TimeInterval = 15 * 60

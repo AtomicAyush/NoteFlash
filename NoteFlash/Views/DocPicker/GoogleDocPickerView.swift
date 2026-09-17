@@ -2,9 +2,9 @@ import Observation
 import SwiftUI
 
 /// Browse Google Drive like the Drive app (folders, shared, starred, recent, search),
-/// preview a doc, and choose it for a new deck.
+/// preview a Doc, Slides, PDF, or PowerPoint file, and choose it for a new deck.
 struct GoogleDocPickerView: View {
-    /// Docs that already have a deck, marked in the lists.
+    /// Files that already have a deck, marked in the lists.
     let linkedDocIDs: Set<String>
     let onSelect: (DriveItem) -> Void
 
@@ -71,9 +71,9 @@ struct GoogleDocPickerView: View {
     private var root: some View {
         if source.requiresSignIn(googleAuth) {
             ContentUnavailableView {
-                Label("Sign In to See Your Docs", systemImage: "person.crop.circle")
+                Label("Sign In to See Your Files", systemImage: "person.crop.circle")
             } description: {
-                Text("Sign in with Google to browse your Drive and pick a doc.")
+                Text("Sign in with Google to browse your Drive and pick a Doc, Slides, PDF, or PowerPoint file.")
             } actions: {
                 GoogleSignInButton(prominent: true)
             }
@@ -103,9 +103,9 @@ struct GoogleDocPickerView: View {
 struct DrivePermissionView: View {
     var body: some View {
         ContentUnavailableView {
-            Label("Allow Access to Your Docs List", systemImage: "list.bullet.rectangle")
+            Label("Allow Access to Your Drive", systemImage: "list.bullet.rectangle")
         } description: {
-            Text("NoteFlash needs read-only access to the names of your Drive files to show your Docs here. It never changes your files.")
+            Text("NoteFlash needs read-only access to list your Drive files and read the ones you choose. It never changes your files.")
         } actions: {
             GoogleSignInButton(title: "Allow Access", systemImage: "checkmark.shield", prominent: true)
         }

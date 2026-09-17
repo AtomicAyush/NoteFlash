@@ -825,7 +825,9 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         """
         You write study flashcards from a student's class notes. Each card asks one question \
         about one fact in the notes. Stay faithful to the notes and don't add facts they don't \
-        contain. Skip headings, and don't ask yes/no or true/false questions. Write plain text.
+        contain. Skip headings, and don't ask yes/no or true/false questions. Ask about the \
+        subject itself, never about the notes, the slides, or what a speaker said or mentioned. \
+        Write plain text.
 
         Deck size: \(density.promptGuidance)
         """

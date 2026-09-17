@@ -6,7 +6,7 @@ enum DriveLayout: String {
     case grid
 }
 
-/// Folders and docs at one Drive location (or search results), in a list or grid.
+/// Folders and files at one Drive location (or search results), in a list or grid.
 struct DriveListingView: View {
     let content: DriveListingModel.Content
     let title: String?
@@ -52,7 +52,7 @@ struct DriveListingView: View {
                     )
                 }
             }
-            .task(id: "\(sortRaw)-\(ascending)-\(googleAuth.canListDocs)") {
+            .task(id: "\(sortRaw)-\(ascending)-\(googleAuth.hasDriveAccess)") {
                 await model.load(sort: effectiveSort, ascending: effectiveAscending, context: context, auth: googleAuth)
             }
     }
@@ -97,17 +97,17 @@ struct DriveListingView: View {
         case .search(let term):
             ContentUnavailableView.search(text: term)
         case .location(.folder):
-            ContentUnavailableView("No Docs Here", systemImage: "folder",
-                                   description: Text("This folder has no Google Docs or folders."))
+            ContentUnavailableView("Nothing to Use Here", systemImage: "folder",
+                                   description: Text("This folder has no Google Docs, Slides, PDFs, PowerPoint files, or folders."))
         case .location(.sharedWithMe):
             ContentUnavailableView("Nothing Shared", systemImage: "person.2",
-                                   description: Text("Google Docs that people share with you will appear here."))
+                                   description: Text("Docs, Slides, PDFs, and PowerPoint files that people share with you will appear here."))
         case .location(.starred):
-            ContentUnavailableView("No Starred Docs", systemImage: "star",
-                                   description: Text("Star docs or folders in Google Drive to find them here quickly."))
+            ContentUnavailableView("Nothing Starred", systemImage: "star",
+                                   description: Text("Star files or folders in Google Drive to find them here quickly."))
         case .location(.recent):
-            ContentUnavailableView("No Recent Docs", systemImage: "clock",
-                                   description: Text("Google Docs you open will appear here."))
+            ContentUnavailableView("Nothing Recent", systemImage: "clock",
+                                   description: Text("Docs, Slides, PDFs, and PowerPoint files you open will appear here."))
         }
     }
 
@@ -231,13 +231,13 @@ struct DriveListingView: View {
 
     @ViewBuilder
     private func docMenu(_ doc: DriveItem) -> some View {
-        Button("Use This Doc", systemImage: "checkmark.circle") { context.select(doc) }
+        Button("Use This File", systemImage: "checkmark.circle") { context.select(doc) }
         NavigationLink(value: DriveRoute.preview(doc)) {
             Label("Preview", systemImage: "eye")
         }
-        if let url = URL(string: doc.editURL) {
+        if let url = doc.openURL {
             Link(destination: url) {
-                Label("Open in Google Docs", systemImage: "arrow.up.right.square")
+                Label(doc.kind?.openLabel ?? "Open in Google Drive", systemImage: "arrow.up.right.square")
             }
         }
     }

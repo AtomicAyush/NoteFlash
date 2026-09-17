@@ -8,16 +8,21 @@ struct SourceNotesView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if deck.sourceKind == .pdf, let data = deck.sourcePDF {
+                if deck.sourceKind == .pdf || deck.sourceKind == .drivePDF, let data = deck.sourcePDF {
                     PDFKitView(data: data)
                         .ignoresSafeArea(edges: .bottom)
                 } else if deck.sourceText.isEmpty {
                     ContentUnavailableView("No Notes", systemImage: "doc.text")
-                } else {
+                } else if deck.sourceKind == .text {
                     ScrollView {
                         Text(deck.sourceText)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                } else {
+                    ScrollView {
+                        DocTextView(text: deck.sourceText)
                             .padding()
                     }
                 }
@@ -31,7 +36,7 @@ struct SourceNotesView: View {
                 if let link = deck.googleDocURL.flatMap(URL.init(string:)) {
                     ToolbarItem(placement: .topBarLeading) {
                         Link(destination: link) {
-                            Label("Open in Google Docs", systemImage: "arrow.up.right.square")
+                            Label(deck.openLinkLabel, systemImage: "arrow.up.right.square")
                         }
                     }
                 }

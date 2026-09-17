@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// Where the doc picker gets its Drive data: the Drive and Docs APIs, or sample data in UI tests.
+/// Where the Drive picker gets its data: the Google APIs, or sample data in UI tests.
 protocol DriveDataSource {
     func requiresSignIn(_ auth: GoogleAuth) -> Bool
     func requiresListPermission(_ auth: GoogleAuth) -> Bool
@@ -9,7 +9,7 @@ protocol DriveDataSource {
     func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage
     func search(_ term: String, pageToken: String?, auth: GoogleAuth) async throws -> DrivePage
     func folderName(id: String, auth: GoogleAuth) async throws -> String
-    func document(id: String, auth: GoogleAuth) async throws -> GoogleDocContent
+    func content(of item: DriveItem, auth: GoogleAuth) async throws -> DriveFileContent
     func thumbnail(for item: DriveItem, auth: GoogleAuth) async -> UIImage?
 }
 
@@ -27,7 +27,7 @@ struct LiveDriveDataSource: DriveDataSource {
 
     func requiresSignIn(_ auth: GoogleAuth) -> Bool { !auth.isSignedIn }
 
-    func requiresListPermission(_ auth: GoogleAuth) -> Bool { !auth.canListDocs }
+    func requiresListPermission(_ auth: GoogleAuth) -> Bool { !auth.hasDriveAccess }
 
     func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, auth: GoogleAuth) async throws -> DriveListing {
         let orderBy = Self.orderBy(for: location, sort: sort, ascending: ascending)
@@ -35,7 +35,7 @@ struct LiveDriveDataSource: DriveDataSource {
             async let folders = Self.folders(in: location, orderBy: orderBy, token: token)
             async let docs = GoogleDriveClient.listFiles(
                 accessToken: token,
-                query: DriveQuery.items(in: location, mimeType: DriveMimeType.document),
+                query: DriveQuery.items(in: location, mimeTypes: DriveMimeType.readable),
                 orderBy: orderBy,
                 pageSize: 50,
                 pageToken: nil
@@ -49,7 +49,7 @@ struct LiveDriveDataSource: DriveDataSource {
         return try await authorized(auth) { token in
             try await GoogleDriveClient.listFiles(
                 accessToken: token,
-                query: DriveQuery.items(in: location, mimeType: DriveMimeType.document),
+                query: DriveQuery.items(in: location, mimeTypes: DriveMimeType.readable),
                 orderBy: orderBy,
                 pageSize: 50,
                 pageToken: pageToken
@@ -72,10 +72,8 @@ struct LiveDriveDataSource: DriveDataSource {
         }
     }
 
-    func document(id: String, auth: GoogleAuth) async throws -> GoogleDocContent {
-        try await authorized(auth) { token in
-            try await GoogleDocsClient.fetchViaAPI(documentID: id, accessToken: token)
-        }
+    func content(of item: DriveItem, auth: GoogleAuth) async throws -> DriveFileContent {
+        try await DriveFileReader(auth: auth).read(item.reference)
     }
 
     func thumbnail(for item: DriveItem, auth: GoogleAuth) async -> UIImage? {
@@ -100,7 +98,7 @@ struct LiveDriveDataSource: DriveDataSource {
         guard location != .recent else { return [] }
         return try await GoogleDriveClient.allFiles(
             accessToken: token,
-            query: DriveQuery.items(in: location, mimeType: DriveMimeType.folder),
+            query: DriveQuery.items(in: location, mimeTypes: [DriveMimeType.folder]),
             orderBy: orderBy
         )
     }

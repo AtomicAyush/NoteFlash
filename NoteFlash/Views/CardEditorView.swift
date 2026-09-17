@@ -37,7 +37,7 @@ struct CardEditorView: View {
                 Section {
                     Toggle("Starred", systemImage: "star", isOn: $isStarred)
                 } footer: {
-                    if deck.isLinkedToGoogleDoc || deck.sourceKind == .text {
+                    if deck.isLinkedToDrive || deck.sourceKind == .text {
                         Text("Cards you write or edit are never changed when the notes update.")
                     }
                 }

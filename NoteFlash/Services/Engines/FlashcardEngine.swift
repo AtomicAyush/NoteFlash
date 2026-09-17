@@ -131,6 +131,7 @@ nonisolated enum CardWriting {
         - The front is a term or a short, specific question. The back is the answer, short enough to recall from memory (usually under 25 words).
         - Stay faithful to the notes. Don't add facts the notes don't contain, though you may fix obvious typos.
         - Avoid duplicate or overlapping cards, and avoid yes/no questions.
+        - Ask about the subject itself, never about the notes or slides (what was mentioned, what a speaker emphasized). Speaker notes from slides are a source of facts, not a topic.
         - Keep the notes' own terminology. Write plain text without Markdown; write math inline (for example, x^2 + 3x).
         - Order cards the way their topics appear in the notes.
         """
@@ -144,8 +145,9 @@ nonisolated enum CardWriting {
         - If the edits are cosmetic (formatting, typos, reordering), return empty lists.
         """
 
-    /// Trims cards and drops empty, duplicate (same front, ignoring case and spacing), and
-    /// self-answering ones (the front already contains the answer, or the back repeats the front).
+    /// Trims cards and drops empty, duplicate (same front, ignoring case and spacing),
+    /// self-answering (the front already contains the answer, or the back repeats the front),
+    /// and meta cards (questions about the notes or slides rather than the subject).
     static func cleaned(_ cards: [GeneratedCard], excludingFronts existing: Set<String> = []) -> [GeneratedCard] {
         var seen = existing
         var result: [GeneratedCard] = []
@@ -157,10 +159,23 @@ nonisolated enum CardWriting {
             guard !frontKey.isEmpty, !backKey.isEmpty, !front.hasPrefix("#") else { continue }
             if frontKey == backKey { continue }
             if backKey.count >= 3, " \(frontKey) ".contains(" \(backKey) ") { continue }
+            if isAboutTheNotes(frontKey) { continue }
             guard seen.insert(frontKey).inserted else { continue }
             result.append(GeneratedCard(front: front, back: back))
         }
         return result
+    }
+
+    private static let metaPhrases = [
+        "speaker notes", "presenter notes", "in the notes", "the notes say", "according to the notes",
+        "on the slide", "in the slides", "the speaker", "the presenter", "was mentioned", "were mentioned",
+        "is mentioned", "are mentioned",
+    ]
+
+    /// True for questions about the notes themselves ("What was mentioned in the speaker notes?").
+    static func isAboutTheNotes(_ normalizedFront: String) -> Bool {
+        let padded = " \(normalizedFront) "
+        return metaPhrases.contains { padded.contains(" \($0) ") }
     }
 
     static func normalizedKey(_ text: String) -> String {

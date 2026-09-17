@@ -101,7 +101,7 @@ struct WorkingOverlay: View {
     }
 }
 
-/// Sign-in controls for reading private Google Docs.
+/// Sign-in controls for reading private Google Drive files.
 struct GoogleAccountSection: View {
     @Environment(GoogleAuth.self) private var googleAuth
 
@@ -112,8 +112,8 @@ struct GoogleAccountSection: View {
                     .foregroundStyle(.orange)
             } else if googleAuth.isSignedIn {
                 LabeledContent("Signed in", value: googleAuth.email ?? "Google account")
-                if !googleAuth.canListDocs {
-                    GoogleSignInButton(title: "Allow Access to Your Docs List", systemImage: "list.bullet.rectangle")
+                if !googleAuth.hasDriveAccess {
+                    GoogleSignInButton(title: "Allow Access to Your Drive", systemImage: "list.bullet.rectangle")
                 }
                 Button("Sign Out", role: .destructive) {
                     googleAuth.signOut()
@@ -125,9 +125,9 @@ struct GoogleAccountSection: View {
             Text("Google Account")
         } footer: {
             if googleAuth.isConfigured {
-                Text("Signing in lets NoteFlash show your Google Docs and read the ones you choose (read-only). Docs shared as “Anyone with the link” work without signing in.")
+                Text("Signing in lets NoteFlash list your Google Drive files and read the Docs, Slides, PDFs, and PowerPoint files you choose (read-only). Files shared as “Anyone with the link” work without signing in.")
             } else {
-                Text("Add your OAuth client ID in AppConfig.swift to read private docs (see README). Until then, share docs as “Anyone with the link can view”.")
+                Text("Add your OAuth client ID in AppConfig.swift to read private files (see README). Until then, share files as “Anyone with the link can view”.")
             }
         }
     }

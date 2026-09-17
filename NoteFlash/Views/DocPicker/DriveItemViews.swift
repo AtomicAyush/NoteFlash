@@ -96,7 +96,7 @@ struct DriveDocCard: View {
                 }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    DocGlyph()
+                    FileGlyph(kind: item.kind)
                     Text(item.name)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(2, reservesSpace: true)
@@ -189,7 +189,7 @@ struct DriveThumbnailView: View {
                     }
                     .clipped()
             } else {
-                PagePlaceholder(compact: compact)
+                PagePlaceholder(kind: item.kind, compact: compact)
             }
         }
         .clipShape(.rect(cornerRadius: compact ? 5 : 0))
@@ -207,13 +207,14 @@ struct DriveThumbnailView: View {
 
 /// A blank page with text lines, shown until (or instead of) Drive's thumbnail.
 private struct PagePlaceholder: View {
+    let kind: DriveFileKind?
     let compact: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 3 : 6) {
             ForEach(0..<(compact ? 5 : 7), id: \.self) { index in
                 Capsule()
-                    .fill(index == 0 ? Color.docBlue.opacity(0.5) : Color.gray.opacity(0.22))
+                    .fill(index == 0 ? Color.driveKind(kind).opacity(0.5) : Color.gray.opacity(0.22))
                     .frame(height: compact ? 2.5 : 5)
                     .frame(maxWidth: index == 0 ? (compact ? 16 : 70) : (index % 3 == 2 ? (compact ? 18 : 90) : .infinity),
                            alignment: .leading)
@@ -223,17 +224,25 @@ private struct PagePlaceholder: View {
         .padding(compact ? 7 : 16)
         .overlay(alignment: .bottomTrailing) {
             if !compact {
-                DocGlyph().padding(10)
+                FileGlyph(kind: kind).padding(10)
+            } else if kind != .document {
+                FileGlyph(kind: kind)
+                    .font(.system(size: 9))
+                    .padding(3)
             }
         }
     }
 }
 
-struct DocGlyph: View {
+/// The file type's icon in its Google Drive color.
+struct FileGlyph: View {
+    let kind: DriveFileKind?
+
     var body: some View {
-        Image(systemName: "doc.text.fill")
+        Image(systemName: kind?.systemImage ?? "doc.fill")
             .font(.caption)
-            .foregroundStyle(Color.docBlue)
+            .foregroundStyle(Color.driveKind(kind))
+            .accessibilityLabel(kind?.label ?? "File")
     }
 }
 
@@ -320,7 +329,7 @@ enum DriveText {
     }
 
     static func modified(_ item: DriveItem) -> String {
-        guard let date = item.modifiedTime else { return "Google Doc" }
+        guard let date = item.modifiedTime else { return item.kind?.label ?? "Google Drive" }
         if item.lastModifiedByMe { return "Modified \(short(date)) by you" }
         if let name = item.lastModifierName { return "Modified \(short(date)) by \(name)" }
         return "Modified \(short(date))"
@@ -344,4 +353,17 @@ enum DriveText {
 
 extension Color {
     static let docBlue = Color(red: 0.26, green: 0.52, blue: 0.96)
+    static let slidesYellow = Color(red: 0.96, green: 0.67, blue: 0.0)
+    static let pdfRed = Color(red: 0.86, green: 0.2, blue: 0.18)
+    static let powerPointOrange = Color(red: 0.82, green: 0.33, blue: 0.16)
+
+    /// The color Google Drive uses for each file type.
+    static func driveKind(_ kind: DriveFileKind?) -> Color {
+        switch kind {
+        case .document, nil: docBlue
+        case .presentation: slidesYellow
+        case .pdf: pdfRed
+        case .powerPoint: powerPointOrange
+        }
+    }
 }

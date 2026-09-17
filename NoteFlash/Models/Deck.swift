@@ -16,10 +16,14 @@ final class Deck {
     @Attribute(.externalStorage) var sourcePDF: Data?
     var densityRaw: String = CardDensity.balanced.rawValue
 
-    // Google Doc sync state.
+    // Google Drive sync state. (Named for Docs, which were the first linked files.)
+    /// The linked Drive file's ID.
     var googleDocID: String?
+    /// A link that opens the file in Docs, Slides, or Drive.
     var googleDocURL: String?
     var sourceHash: String?
+    /// The Drive version (or content hash) the notes were read from.
+    var sourceVersion: String?
     var autoSync: Bool = true
     var lastCheckedAt: Date?
     var lastChangedAt: Date?
@@ -49,7 +53,16 @@ final class Deck {
         set { densityRaw = newValue.rawValue }
     }
 
-    var isLinkedToGoogleDoc: Bool { googleDocID != nil }
+    var isLinkedToDrive: Bool { googleDocID != nil }
+
+    var driveReference: DriveFileReference? {
+        googleDocID.map { DriveFileReference(id: $0, kind: sourceKind.driveFileKind, name: sourceName) }
+    }
+
+    /// "Open in Google Slides", for linked decks.
+    var openLinkLabel: String {
+        sourceKind.driveFileKind?.openLabel ?? "Open in Google Drive"
+    }
 
     var sortedCards: [Flashcard] {
         cards.sorted { $0.order < $1.order }

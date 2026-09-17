@@ -157,7 +157,7 @@ private struct DeckRow: View {
                     .lineLimit(2)
                 HStack(spacing: 6) {
                     Text("^[\(deck.cards.count) card](inflect: true)")
-                    if deck.isLinkedToGoogleDoc {
+                    if deck.isLinkedToDrive {
                         Text("·")
                         SyncStatusLabel(deck: deck)
                             .labelStyle(.titleOnly)

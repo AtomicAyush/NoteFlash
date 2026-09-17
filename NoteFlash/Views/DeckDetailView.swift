@@ -42,7 +42,7 @@ struct DeckDetailView: View {
 
             Section {
                 sourceRow
-                if deck.isLinkedToGoogleDoc {
+                if deck.isLinkedToDrive {
                     syncRows
                 }
                 masteryRow
@@ -97,7 +97,7 @@ struct DeckDetailView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar { toolbarMenu }
         .refreshable {
-            if deck.isLinkedToGoogleDoc { await checkDoc() }
+            if deck.isLinkedToDrive { await checkDoc() }
         }
         .overlay {
             if isBusy && !isJobRunning {
@@ -168,7 +168,7 @@ struct DeckDetailView: View {
                         Text(sourceTitle)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text("View notes")
+                        Text(deck.sourceKind == .text ? "View notes" : "\(deck.sourceKind.label) · View notes")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -182,8 +182,7 @@ struct DeckDetailView: View {
     private var sourceTitle: String {
         switch deck.sourceKind {
         case .text: "Typed notes"
-        case .pdf: deck.sourceName ?? "PDF"
-        case .googleDoc: deck.sourceName ?? "Google Doc"
+        default: deck.sourceName ?? deck.sourceKind.label
         }
     }
 
@@ -212,7 +211,7 @@ struct DeckDetailView: View {
                     .foregroundStyle(.orange)
             }
         }
-        Toggle("Auto-sync with doc", isOn: $deck.autoSync)
+        Toggle("Auto-sync with \(deck.sourceKind.driveFileKind?.label ?? "Google Drive")", isOn: $deck.autoSync)
     }
 
     private var masteryRow: some View {
@@ -237,10 +236,10 @@ struct DeckDetailView: View {
                 if deck.sourceKind == .text {
                     Button("Edit Notes", systemImage: "square.and.pencil") { isEditingNotes = true }
                 }
-                if deck.isLinkedToGoogleDoc,
+                if deck.isLinkedToDrive,
                    let link = deck.googleDocURL.flatMap(URL.init(string:)) {
                     Link(destination: link) {
-                        Label("Open in Google Docs", systemImage: "arrow.up.right.square")
+                        Label(deck.openLinkLabel, systemImage: "arrow.up.right.square")
                     }
                 }
                 Button("Rename", systemImage: "pencil") {

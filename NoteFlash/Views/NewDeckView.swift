@@ -3,45 +3,82 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct NewDeckView: View {
+    /// Where the notes for a new deck come from.
+    enum Source: String, CaseIterable, Identifiable {
+        case text
+        case file
+        case drive
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .text: "Text"
+            case .file: "File"
+            case .drive: "Google Drive"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .text: "text.alignleft"
+            case .file: "doc"
+            case .drive: "externaldrive"
+            }
+        }
+    }
+
+    /// A PDF or PowerPoint file picked from Files.
+    nonisolated private struct PickedFile: Sendable {
+        let name: String
+        let data: Data
+        let isPresentation: Bool
+        /// "12 pages" or "8 slides"
+        let summary: String
+        /// Approximate notes length, for the time estimate.
+        let characters: Int
+    }
+
+    private static let powerPointType = UTType("org.openxmlformats.presentationml.presentation") ?? .presentation
+
     @Environment(\.dismiss) private var dismiss
     @Environment(ProcessingCenter.self) private var processing
     @Environment(GoogleAuth.self) private var googleAuth
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
     @Query private var decks: [Deck]
 
-    @State private var kind: SourceKind = .text
+    @State private var source: Source = .text
     @State private var title = ""
     @State private var notes = ""
-    @State private var pdfData: Data?
-    @State private var pdfName: String?
-    @State private var pdfPageCount = 0
-    @State private var docLink = ""
-    @State private var selectedDoc: DriveItem?
-    @State private var isPickingDoc = false
+    @State private var pickedFile: PickedFile?
+    @State private var isReadingFile = false
+    @State private var isImportingFile = false
+    @State private var driveLink = ""
+    @State private var selectedFile: DriveItem?
+    @State private var isPickingFile = false
     @State private var autoSync = true
     @State private var density: CardDensity = .balanced
-    @State private var isImportingPDF = false
     @State private var errorMessage: String?
 
     private var canGenerate: Bool {
-        switch kind {
+        switch source {
         case .text: !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .pdf: pdfData != nil
-        case .googleDoc: chosenDocumentID != nil
+        case .file: pickedFile != nil
+        case .drive: chosenReference != nil
         }
     }
 
-    private var chosenDocumentID: String? {
-        selectedDoc?.id ?? GoogleDocsClient.documentID(from: docLink)
+    private var chosenReference: DriveFileReference? {
+        selectedFile?.reference ?? DriveFileReference(link: driveLink)
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Picker("Source", selection: $kind) {
-                        ForEach(SourceKind.allCases) { kind in
-                            Label(kind.label, systemImage: kind.systemImage).tag(kind)
+                    Picker("Source", selection: $source) {
+                        ForEach(Source.allCases) { source in
+                            Label(source.label, systemImage: source.systemImage).tag(source)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -49,10 +86,10 @@ struct NewDeckView: View {
                     .listRowInsets(EdgeInsets())
                 }
 
-                switch kind {
+                switch source {
                 case .text: textSection
-                case .pdf: pdfSection
-                case .googleDoc: googleDocSections
+                case .file: fileSection
+                case .drive: driveSections
                 }
 
                 Section {
@@ -91,14 +128,18 @@ struct NewDeckView: View {
                     Button("Generate", systemImage: "sparkles") {
                         generate()
                     }
-                    .disabled(!canGenerate)
+                    .disabled(!canGenerate || isReadingFile)
                 }
             }
-            .fileImporter(isPresented: $isImportingPDF, allowedContentTypes: [.pdf], onCompletion: importPDF)
-            .sheet(isPresented: $isPickingDoc) {
-                GoogleDocPickerView(linkedDocIDs: Set(decks.compactMap(\.googleDocID))) { doc in
-                    selectedDoc = doc
-                    docLink = doc.editURL
+            .fileImporter(
+                isPresented: $isImportingFile,
+                allowedContentTypes: [.pdf, Self.powerPointType],
+                onCompletion: importFile
+            )
+            .sheet(isPresented: $isPickingFile) {
+                GoogleDocPickerView(linkedDocIDs: Set(decks.compactMap(\.googleDocID))) { item in
+                    selectedFile = item
+                    driveLink = ""
                 }
             }
         }
@@ -130,74 +171,86 @@ struct NewDeckView: View {
         }
     }
 
-    private var pdfSection: some View {
+    private var fileSection: some View {
         Section {
-            if let pdfName {
+            if let pickedFile {
                 LabeledContent {
-                    Text("^[\(pdfPageCount) page](inflect: true)")
+                    Text(pickedFile.summary)
                 } label: {
-                    Label(pdfName, systemImage: "doc.richtext.fill")
+                    Label(pickedFile.name, systemImage: pickedFile.isPresentation ? "rectangle.on.rectangle.fill" : "doc.richtext.fill")
                         .lineLimit(2)
                 }
-                Button("Choose a Different PDF") { isImportingPDF = true }
+                Button("Choose a Different File") { isImportingFile = true }
+            } else if isReadingFile {
+                HStack {
+                    Text("Reading file…")
+                    Spacer()
+                    ProgressView()
+                }
             } else {
                 Button {
-                    isImportingPDF = true
+                    isImportingFile = true
                 } label: {
-                    Label("Choose PDF…", systemImage: "doc.badge.plus")
+                    Label("Choose PDF or PowerPoint…", systemImage: "doc.badge.plus")
                 }
             }
         } header: {
-            Text("PDF")
+            Text("PDF or PowerPoint")
         } footer: {
-            switch engine {
-            case .apple:
-                Text("Text is read from the PDF on this iPhone. Scanned pages go through on-device text recognition.")
-            case .claude:
-                Text("Claude reads the whole PDF, including scanned pages, tables, and diagrams.")
+            if pickedFile?.isPresentation == true {
+                Text("Slide titles, text, tables, and speaker notes become your notes. Pictures and charts aren't read.")
+            } else if pickedFile != nil {
+                switch engine {
+                case .apple:
+                    Text("Text is read from the PDF on this iPhone. Scanned pages go through on-device text recognition.")
+                case .claude:
+                    Text("Claude reads the whole PDF, including scanned pages, tables, and diagrams.")
+                }
+            } else {
+                Text("Choose a PDF or a PowerPoint (.pptx) file from Files, iCloud Drive, or another storage app. For files in Google Drive, use the Google Drive tab so the deck stays in sync.")
             }
         }
     }
 
     @ViewBuilder
-    private var googleDocSections: some View {
+    private var driveSections: some View {
         Section {
             if googleAuth.isConfigured {
-                if let selectedDoc {
-                    selectedDocRow(selectedDoc)
+                if let selectedFile {
+                    selectedFileRow(selectedFile)
                 } else {
                     Button {
-                        isPickingDoc = true
+                        isPickingFile = true
                     } label: {
                         Label("Choose from Google Drive", systemImage: "doc.text.magnifyingglass")
                     }
                 }
             }
-            if selectedDoc == nil {
+            if selectedFile == nil {
                 TextField(
-                    googleAuth.isConfigured ? "Or paste a doc link" : "https://docs.google.com/document/d/…",
-                    text: $docLink,
+                    googleAuth.isConfigured ? "Or paste a link" : "https://docs.google.com/…",
+                    text: $driveLink,
                     axis: .vertical
                 )
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 PasteButton(payloadType: String.self) { strings in
-                    docLink = strings.first ?? docLink
+                    driveLink = strings.first ?? driveLink
                 }
             }
-            Toggle("Keep cards in sync with the doc", isOn: $autoSync)
+            Toggle("Keep cards in sync with the file", isOn: $autoSync)
         } header: {
-            Text("Google Doc")
+            Text("Google Drive")
         } footer: {
-            Text("When the doc changes, NoteFlash updates the affected cards and adds cards for new material. Cards you edit by hand are never overwritten.")
+            Text("Works with Google Docs, Google Slides, PDFs, and PowerPoint files. When the file changes, NoteFlash updates the affected cards and adds cards for new material. Cards you edit by hand are never overwritten.")
         }
 
-        if selectedDoc == nil {
+        if selectedFile == nil {
             Section {
-                DisclosureGroup("How to share a doc by link") {
+                DisclosureGroup("How to share a file by link") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Open the doc in Google Docs and tap **Share**.", systemImage: "1.circle")
+                        Label("Open the file in Google Docs, Slides, or Drive and tap **Share**.", systemImage: "1.circle")
                         Label("Under **General access**, choose **Anyone with the link** (Viewer is enough).", systemImage: "2.circle")
                         Label("Tap **Copy link**, then tap **Paste** above.", systemImage: "3.circle")
                     }
@@ -206,29 +259,29 @@ struct NewDeckView: View {
                 }
             } footer: {
                 Text(googleAuth.isConfigured
-                    ? "Links work for docs shared as “Anyone with the link”, even without signing in. To use a private doc, choose it from Google Drive instead."
-                    : "NoteFlash reads docs shared as “Anyone with the link can view”. Anyone with the link can read the doc, so avoid sharing private information this way.")
+                    ? "Links work for files shared as “Anyone with the link”, even without signing in. To use a private file, choose it from Google Drive instead."
+                    : "NoteFlash reads files shared as “Anyone with the link can view”. Anyone with the link can read the file, so avoid sharing private information this way.")
             }
         }
     }
 
-    private func selectedDocRow(_ doc: DriveItem) -> some View {
+    private func selectedFileRow(_ file: DriveItem) -> some View {
         HStack(spacing: 12) {
             Button {
-                isPickingDoc = true
+                isPickingFile = true
             } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "doc.text.fill")
+                    Image(systemName: file.kind?.systemImage ?? "doc.fill")
                         .font(.title2)
-                        .foregroundStyle(Color.docBlue)
+                        .foregroundStyle(Color.driveKind(file.kind))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(doc.name)
+                        Text(file.name)
                             .foregroundStyle(.primary)
                             .lineLimit(2)
-                        Text(DriveText.modified(doc))
+                        Text(DriveText.modified(file))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("Tap to choose a different doc")
+                        Text("Tap to choose a different file")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -239,54 +292,81 @@ struct NewDeckView: View {
             .buttonStyle(.plain)
 
             Button {
-                selectedDoc = nil
-                docLink = ""
+                selectedFile = nil
+                driveLink = ""
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Remove doc")
+            .accessibilityLabel("Remove file")
         }
     }
 
     // MARK: Actions
 
-    private func importPDF(_ result: Result<URL, Error>) {
+    private func importFile(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let data: Data
             do {
-                let data = try Data(contentsOf: url)
-                guard let pageCount = PDFTextExtractor.pageCount(of: data) else {
-                    errorMessage = DeckCreator.CreationError.unreadablePDF.localizedDescription
-                    return
-                }
-                pdfData = data
-                pdfName = url.lastPathComponent
-                pdfPageCount = pageCount
-                errorMessage = nil
+                data = try Data(contentsOf: url)
             } catch {
                 errorMessage = error.localizedDescription
+                return
+            }
+            let name = url.lastPathComponent
+            errorMessage = nil
+            pickedFile = nil
+            isReadingFile = true
+            Task {
+                defer { isReadingFile = false }
+                do {
+                    pickedFile = try await Self.inspect(data, name: name)
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
             }
         case .failure(let error):
             errorMessage = error.localizedDescription
         }
     }
 
-    /// Rough processing time for typed notes or a PDF (a Google Doc's length isn't known yet).
+    /// Checks that a file can be read, and measures it for the time estimate.
+    @concurrent
+    private static func inspect(_ data: Data, name: String) async throws -> PickedFile {
+        if PowerPointTextExtractor.isPresentation(data) {
+            let slides = try PowerPointTextExtractor.extract(from: data)
+            guard !slides.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw DriveFileReader.ReadError.empty
+            }
+            let summary = slides.slideCount == 1 ? "1 slide" : "\(slides.slideCount) slides"
+            return PickedFile(name: name, data: data, isPresentation: true, summary: summary, characters: slides.text.count)
+        }
+        guard let pages = PDFTextExtractor.pageCount(of: data) else {
+            throw DeckCreator.CreationError.unsupportedFile
+        }
+        let summary = pages == 1 ? "1 page" : "\(pages) pages"
+        return PickedFile(
+            name: name, data: data, isPresentation: false, summary: summary,
+            characters: ProcessingEstimator.estimatedCharacters(pdfPages: pages)
+        )
+    }
+
+    /// Rough processing time for typed notes or a file (a Drive file's length isn't known yet).
     private var estimatedSeconds: TimeInterval? {
         let characters: Int
-        switch kind {
+        switch source {
         case .text:
             characters = notes.trimmingCharacters(in: .whitespacesAndNewlines).count
             guard characters > 0 else { return nil }
-        case .pdf:
-            guard pdfData != nil else { return nil }
-            characters = ProcessingEstimator.estimatedCharacters(pdfPages: pdfPageCount)
-        case .googleDoc:
+        case .file:
+            guard let pickedFile else { return nil }
+            characters = pickedFile.characters
+        case .drive:
             return nil
         }
         return ProcessingEstimator.expectedDuration(engine: engine, characters: characters)
@@ -299,30 +379,29 @@ struct NewDeckView: View {
             return
         }
 
-        let source: NewDeckSource
+        let deckSource: NewDeckSource
         let jobTitle: String
-        switch kind {
+        switch source {
         case .text:
             let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
-            source = .text(title: trimmedTitle, notes: notes)
+            deckSource = .text(title: trimmedTitle, notes: notes)
             let firstLine = TextDiff.lines(of: notes).first?
                 .trimmingCharacters(in: CharacterSet(charactersIn: "# "))
             jobTitle = trimmedTitle.isEmpty ? String((firstLine ?? "Your notes").prefix(40)) : trimmedTitle
-        case .pdf:
-            guard let pdfData else { return }
-            let name = pdfName ?? "Document.pdf"
-            source = .pdf(fileName: name, data: pdfData)
-            jobTitle = (name as NSString).deletingPathExtension
-        case .googleDoc:
-            guard let documentID = chosenDocumentID else {
-                errorMessage = GoogleDocsClient.DocsError.invalidLink.localizedDescription
+        case .file:
+            guard let pickedFile else { return }
+            deckSource = .file(fileName: pickedFile.name, data: pickedFile.data)
+            jobTitle = DriveFileReader.stripExtension(pickedFile.name)
+        case .drive:
+            guard let reference = chosenReference else {
+                errorMessage = DriveFileReader.ReadError.invalidLink.localizedDescription
                 return
             }
-            source = .googleDoc(documentID: documentID, autoSync: autoSync)
-            jobTitle = selectedDoc?.name ?? "Google Doc"
+            deckSource = .drive(reference, autoSync: autoSync)
+            jobTitle = selectedFile.map { DriveFileReader.stripExtension($0.name) } ?? reference.kind?.label ?? "Google Drive file"
         }
 
-        processing.startNewDeck(from: source, density: density, title: jobTitle)
+        processing.startNewDeck(from: deckSource, density: density, title: jobTitle)
         dismiss()
     }
 }

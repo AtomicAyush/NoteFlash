@@ -66,9 +66,11 @@ final class GoogleAuth {
         static let docs = "https://www.googleapis.com/auth/documents.readonly"
         /// File names and dates only, used to list the user's Docs.
         static let driveList = "https://www.googleapis.com/auth/drive.metadata.readonly"
+        /// File contents, used to read Slides, PDFs, and PowerPoint files the user picks.
+        static let driveRead = "https://www.googleapis.com/auth/drive.readonly"
     }
 
-    static let scopes = ["openid", "email", Scope.docs, Scope.driveList].joined(separator: " ")
+    static let scopes = ["openid", "email", Scope.docs, Scope.driveList, Scope.driveRead].joined(separator: " ")
 
     private(set) var email: String?
     private(set) var isSignedIn = false
@@ -78,9 +80,12 @@ final class GoogleAuth {
 
     var isConfigured: Bool { !AppConfig.googleClientID.isEmpty }
 
-    /// Whether the user allowed NoteFlash to list their Docs. Google lets people
-    /// decline individual permissions, and older sign-ins predate this one.
-    var canListDocs: Bool { isSignedIn && grantedScopes.contains(Scope.driveList) }
+    /// Whether the user allowed NoteFlash to list and read their Drive files. Google lets
+    /// people decline individual permissions, and older sign-ins predate these.
+    var hasDriveAccess: Bool { canReadDriveFiles && grantedScopes.contains(Scope.driveList) }
+
+    /// Whether NoteFlash can download Drive files (Slides, PDFs, PowerPoint).
+    var canReadDriveFiles: Bool { isSignedIn && grantedScopes.contains(Scope.driveRead) }
 
     init() {
         if let data = KeychainStore.data(for: .googleTokens),

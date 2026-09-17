@@ -1,19 +1,22 @@
 # NoteFlash
 
-A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or link a Google Doc, and NoteFlash turns them into a deck of flashcards. Linked Google Docs stay in sync: when the doc changes, only the affected cards are updated, and new cards are added for new material.
+A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or PowerPoint file, or link a Google Doc, Google Slides presentation, or file in Google Drive, and NoteFlash turns them into a deck of flashcards. Linked Drive files stay in sync: when the file changes, only the affected cards are updated, and new cards are added for new material.
 
 ## Features
 
-- **Three ways to add notes:** type or paste text, import a PDF (scanned pages go through on-device text recognition), or add a Google Doc. Browse your Drive like the Drive app (My Drive folders, Shared, Starred, Recent), search by name or text, sort by name or date, switch between list and grid, and preview a doc before using it. You can also paste a link.
+- **Three ways to add notes:**
+  - **Text:** type or paste notes.
+  - **File:** import a PDF (scanned pages go through on-device text recognition) or a PowerPoint (.pptx) file. Slides contribute their titles, text, tables, and speaker notes.
+  - **Google Drive:** use a Google Doc, Google Slides presentation, PDF, or PowerPoint file from Drive. Browse your Drive like the Drive app (My Drive folders, Shared, Starred, Recent), search by name or text, sort by name or date, switch between list and grid, and preview the text before using a file. You can also paste a link.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
-- **Google Doc sync:** linked docs are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect.
+- **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
   - Cards you write or edit by hand are locked and never overwritten.
   - Changed cards get a "New" or "Updated" badge.
 - **Study modes:**
   - **Flashcards:** flip cards and swipe them into Know or Still learning.
   - **Learn:** rounds that start with multiple choice and move to typed or self-graded recall.
   - **Match:** a timed matching game with penalties for wrong matches and a best time.
-- **Background processing:** new decks, regenerated decks, note edits, and Google Doc updates all run as background jobs. The deck list shows each job's progress and time left.
+- **Background processing:** new decks, regenerated decks, note edits, and Google Drive updates all run as background jobs. The deck list shows each job's progress and time left.
   - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen.
   - **If iOS stops background work:** the job pauses and picks up again when you open NoteFlash.
   - **When a job finishes in the background:** a notification lets you open the deck.
@@ -32,18 +35,18 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
 
 1. Open `NoteFlash.xcodeproj`, choose your iPhone, and press Run.
 2. (Optional) To use **Claude**, open Settings, switch "Write cards with" to Claude, and paste an API key from [console.anthropic.com](https://console.anthropic.com/settings/keys). The key is stored only in the device Keychain. The model is set in `AppConfig.claudeModel`.
-3. **Google Docs, no setup needed:** share the doc by link, then paste the link into NoteFlash's **Google Doc** tab. In Google Docs, tap **Share**, set **General access** to **Anyone with the link** (Viewer), and tap **Copy link**. NoteFlash reads the doc's text and name from the link and keeps checking it for changes. Anyone with the link can read the doc, so use the setup below for private notes.
+3. **Google Drive files, no setup needed:** share the file by link, then paste the link into NoteFlash's **Google Drive** tab. In Docs, Slides, or Drive, tap **Share**, set **General access** to **Anyone with the link** (Viewer), and tap **Copy link**. NoteFlash reads the file and its name from the link and keeps checking it for changes. Anyone with the link can read the file, so use the setup below for private notes.
 
-### Google Docs setup (private docs, optional)
+### Google Drive setup (private files, optional)
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Docs API** and the **Google Drive API**.
 2. Under **Google Auth Platform → Branding / Audience**, choose *External*, fill in the app name, and add your Google account as a **test user**.
-   Under **Data Access**, add `…/auth/documents.readonly` and `…/auth/drive.metadata.readonly`.
+   Under **Data Access**, add `…/auth/documents.readonly`, `…/auth/drive.metadata.readonly`, and `…/auth/drive.readonly`. Google treats `drive.readonly` as a restricted scope: it works for test users now, but publishing the app requires Google's verification.
 3. Under **Credentials**, create an **OAuth client ID** of type **iOS**, with bundle ID `com.ayushkansal.NoteFlash`.
 4. Paste the client ID (`…apps.googleusercontent.com`) into `AppConfig.googleClientID`.
-5. In the app, open the Google Doc tab and choose **Choose from Google Drive** (or go to Settings and choose **Sign in with Google**).
-   - NoteFlash asks for read-only access to your Docs and to your Drive file list (names and dates only), which it uses to show your Docs.
-   - If you signed in before the file-list permission was added, tap **Allow Access** when the picker asks.
+5. In the app, open the Google Drive tab and choose **Choose from Google Drive** (or go to Settings and choose **Sign in with Google**).
+   - NoteFlash asks for read-only access to your Docs, your Drive file list, and the contents of Drive files. It uses the file list to show your files, and file contents to read the Slides, PDFs, and PowerPoint files you pick. It never changes your files.
+   - If you signed in before a permission was added, tap **Allow Access** when the picker asks (or in Settings → Google Account).
 
 While the consent screen is in *Testing* mode, Google expires refresh tokens after 7 days, so you'll need to sign in again weekly. Publishing the app removes that limit.
 
@@ -55,6 +58,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 | AI engines (shared protocol, Apple, Claude) | `NoteFlash/Services/Engines` |
 | Line diffing and section splitting | `TextDiff.swift`, `NoteChunker.swift` |
 | Google sign-in (OAuth + PKCE, no SDK), Docs reading, Drive browsing | `GoogleAuth.swift`, `GoogleDocsClient.swift`, `GoogleDriveClient.swift`, `DriveDataSource.swift` |
+| Reading Drive files (Docs, Slides, PDFs, PowerPoint) | `DriveFileReader.swift` |
+| PDF and PowerPoint text | `PDFTextExtractor.swift`, `PowerPointTextExtractor.swift`, `ZipArchive.swift` |
 | Drive picker (folders, sort, grid, preview) | `NoteFlash/Views/DocPicker` |
 | Sync, note edits, regeneration | `DocSyncService.swift` |
 | Screens and study modes | `NoteFlash/Views` |
@@ -66,8 +71,16 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Thin sections:** a section that yields fewer cards than expected gets a second pass.
 - **Other failures:** if structured output fails or times out, the section is split or retried as plain text. iOS 26 (`LanguageModelSession.GenerationError`) and iOS 27 (`LanguageModelError`, `LanguageModelSession.Error`, `SystemLanguageModel.Error`, `GeneratedContent.ParsingError`) errors are grouped by `AppleModelFailure`. A model that can't be loaded, such as while it's downloading after an iOS update, gets its own message.
 
+**Reading files.**
+- **PowerPoint:** `PowerPointTextExtractor` unzips the .pptx (`ZipArchive`, using the Compression framework) and reads slides in presentation order. Titles become headings, body text becomes bullets, tables become rows, and speaker notes are kept. Dates, footers, and slide numbers are skipped.
+- **Google Drive:** `DriveFileReader` reads each file type through the Google APIs when signed in:
+  - **Docs:** the Docs API.
+  - **Slides:** exported as .pptx, or as plain text for decks over Drive's 10 MB export limit.
+  - **PDFs and PowerPoint files:** downloaded.
+  - **Shared by link:** without sign-in, or when the signed-in account can't open a file, public export and download links are used. Their type is detected from the downloaded bytes.
+
 **Keeping cards in sync.**
-- **Detecting changes:** the app fingerprints the notes and diffs them line by line.
+- **Detecting changes:** signed in, the app first compares the file's Drive version and skips unchanged files. Otherwise it compares a hash of the download. It then fingerprints the notes and diffs them line by line.
 - **Claude:** reviews the whole deck against the edits in a single request.
 - **Apple Intelligence:** handles one contiguous edit at a time:
   - For removed or changed lines, it first judges whether each related card is still correct, then keeps, updates, or removes it.
@@ -88,7 +101,7 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 
 ## Development notes
 
-- Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive for the doc picker.
+- Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive (Docs, Slides, a PDF, and a PowerPoint file) for the picker.
 - The on-device model's behavior varies from run to run, so check prompt changes against several kinds of notes.
 - Launch with `-appleModelSelfTest` (Debug builds) to run the Apple Intelligence check at startup. The results go to `Documents/NoteFlash-processing-log.txt` in the app's data container. On a macOS 26 Mac, the iOS 27 Simulator can't load the on-device model, so every request fails with a model manager error.
 - `-uiTesting` also swaps in a slow sample engine, so processing progress can be checked in the Simulator. The Simulator can't run continued-processing tasks or Apple's on-device model, so try the Live Activity on a real iPhone.

@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// Shows a doc's details and text so the user can confirm it before making a deck.
+/// Shows a file's details and the notes read from it, so the user can confirm it before making a deck.
 struct GoogleDocPreviewView: View {
     let item: DriveItem
     let context: DrivePickerContext
 
     @Environment(GoogleAuth.self) private var googleAuth
-    @State private var document: GoogleDocContent?
+    @State private var document: DriveFileContent?
     @State private var errorMessage: String?
 
     private var isLinked: Bool { context.linkedDocIDs.contains(item.id) }
@@ -19,7 +19,7 @@ struct GoogleDocPreviewView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 if isLinked {
-                    Label("You already have a deck from this doc. Using it again makes a second deck.",
+                    Label("You already have a deck from this file. Using it again makes a second deck.",
                           systemImage: "checkmark.circle.fill")
                         .font(.footnote)
                         .foregroundStyle(.green)
@@ -33,14 +33,14 @@ struct GoogleDocPreviewView: View {
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 6) {
                 if isEmptyDoc {
-                    Text("This doc is empty, so there's nothing to make cards from.")
+                    Text("This file has no text, so there's nothing to make cards from.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 Button {
                     context.select(item)
                 } label: {
-                    Label("Use This Doc", systemImage: "checkmark")
+                    Label("Use This File", systemImage: "checkmark")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -53,10 +53,10 @@ struct GoogleDocPreviewView: View {
         .navigationTitle("Preview")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let url = URL(string: item.editURL) {
+            if let url = item.openURL {
                 ToolbarItem(placement: .primaryAction) {
                     Link(destination: url) {
-                        Label("Open in Google Docs", systemImage: "arrow.up.right.square")
+                        Label(item.kind?.openLabel ?? "Open in Google Drive", systemImage: "arrow.up.right.square")
                     }
                 }
             }
@@ -71,6 +71,11 @@ struct GoogleDocPreviewView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.name)
                     .font(.title3.weight(.semibold))
+                if let kind = item.kind {
+                    Label(kind.label, systemImage: kind.systemImage)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.driveKind(kind))
+                }
                 detail(DriveText.modified(item), systemImage: "pencil")
                 if let opened = item.viewedByMeTime {
                     detail("You opened \(DriveText.short(opened))", systemImage: "eye")
@@ -81,6 +86,10 @@ struct GoogleDocPreviewView: View {
                     detail("In \(folder)", systemImage: "folder")
                 }
                 if let document, !isEmptyDoc {
+                    if let pages = document.pageCount {
+                        let unit = document.kind == .pdf ? "page" : "slide"
+                        detail(pages == 1 ? "1 \(unit)" : "\(pages) \(unit)s", systemImage: "square.stack")
+                    }
                     let words = Self.wordCount(document.text)
                     detail(words == 1 ? "1 word" : "\(words.formatted()) words", systemImage: "text.alignleft")
                 }
@@ -98,12 +107,19 @@ struct GoogleDocPreviewView: View {
     }
 
     @ViewBuilder
-    private func content(for document: GoogleDocContent?) -> some View {
+    private func content(for document: DriveFileContent?) -> some View {
         if let document {
             if isEmptyDoc {
-                ContentUnavailableView("Empty Doc", systemImage: "doc", description: Text("This doc has no text yet."))
+                ContentUnavailableView("No Text", systemImage: "doc", description: Text(emptyDescription))
             } else {
-                DocTextView(text: document.text)
+                VStack(alignment: .leading, spacing: 10) {
+                    if document.kind != .document {
+                        Text(document.kind == .pdf ? "Text read from the PDF:" : "Text read from the slides:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    DocTextView(text: document.text)
+                }
             }
         } else if let errorMessage {
             ContentUnavailableView {
@@ -115,7 +131,7 @@ struct GoogleDocPreviewView: View {
                     .buttonStyle(.bordered)
             }
         } else {
-            ProgressView("Loading preview…")
+            ProgressView(item.kind == .pdf ? "Reading the PDF…" : "Loading preview…")
                 .frame(maxWidth: .infinity)
                 .padding(.top, 40)
         }
@@ -124,11 +140,19 @@ struct GoogleDocPreviewView: View {
     private func load() async {
         errorMessage = nil
         do {
-            document = try await context.source.document(id: item.id, auth: googleAuth)
+            document = try await context.source.content(of: item, auth: googleAuth)
         } catch is CancellationError {
             // Left the screen.
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private var emptyDescription: String {
+        switch item.kind {
+        case .pdf: "This PDF has no readable text."
+        case .presentation, .powerPoint: "These slides have no text."
+        default: "This doc has no text yet."
         }
     }
 

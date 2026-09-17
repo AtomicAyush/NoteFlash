@@ -2,10 +2,88 @@ import Foundation
 
 nonisolated enum DriveMimeType {
     static let document = "application/vnd.google-apps.document"
+    static let presentation = "application/vnd.google-apps.presentation"
+    static let pdf = "application/pdf"
+    static let powerPoint = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     static let folder = "application/vnd.google-apps.folder"
+    static let plainText = "text/plain"
+
+    /// Files NoteFlash can make decks from.
+    static let readable = [document, presentation, pdf, powerPoint]
 }
 
-/// A Google Doc or folder from the user's Drive.
+/// The kinds of Drive files NoteFlash can read.
+nonisolated enum DriveFileKind: String, Sendable, Hashable {
+    case document
+    case presentation
+    case pdf
+    case powerPoint
+
+    init?(mimeType: String) {
+        switch mimeType {
+        case DriveMimeType.document: self = .document
+        case DriveMimeType.presentation: self = .presentation
+        case DriveMimeType.pdf: self = .pdf
+        case DriveMimeType.powerPoint: self = .powerPoint
+        default: return nil
+        }
+    }
+
+    var mimeType: String {
+        switch self {
+        case .document: DriveMimeType.document
+        case .presentation: DriveMimeType.presentation
+        case .pdf: DriveMimeType.pdf
+        case .powerPoint: DriveMimeType.powerPoint
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .document: "Google Doc"
+        case .presentation: "Google Slides"
+        case .pdf: "PDF"
+        case .powerPoint: "PowerPoint"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .document: "doc.text.fill"
+        case .presentation: "rectangle.on.rectangle.angled.fill"
+        case .pdf: "doc.richtext.fill"
+        case .powerPoint: "rectangle.on.rectangle.fill"
+        }
+    }
+
+    /// The app a link opens in.
+    var openLabel: String {
+        switch self {
+        case .document: "Open in Google Docs"
+        case .presentation: "Open in Google Slides"
+        case .pdf, .powerPoint: "Open in Google Drive"
+        }
+    }
+
+    func openURL(for id: String) -> URL? {
+        switch self {
+        case .document: URL(string: "https://docs.google.com/document/d/\(id)/edit")
+        case .presentation: URL(string: "https://docs.google.com/presentation/d/\(id)/edit")
+        case .pdf, .powerPoint: URL(string: "https://drive.google.com/file/d/\(id)/view")
+        }
+    }
+
+    var sourceKind: SourceKind {
+        switch self {
+        case .document: .googleDoc
+        case .presentation: .googleSlides
+        case .pdf: .drivePDF
+        case .powerPoint: .drivePowerPoint
+        }
+    }
+}
+
+/// A Drive file, folder, or other item from the user's Drive.
 nonisolated struct DriveItem: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -23,7 +101,19 @@ nonisolated struct DriveItem: Identifiable, Hashable, Sendable {
     var thumbnailLink: String?
 
     var isFolder: Bool { mimeType == DriveMimeType.folder }
-    var editURL: String { "https://docs.google.com/document/d/\(id)/edit" }
+    var kind: DriveFileKind? { DriveFileKind(mimeType: mimeType) }
+    var openURL: URL? { (kind ?? .document).openURL(for: id) }
+    var reference: DriveFileReference { DriveFileReference(id: id, kind: kind, name: name) }
+}
+
+/// Metadata used to read a file and to tell whether it changed.
+nonisolated struct DriveFileMetadata: Sendable {
+    let id: String
+    let name: String
+    let mimeType: String
+    let version: String?
+    let size: Int?
+    let canDownload: Bool
 }
 
 nonisolated struct DrivePage: Sendable {
@@ -121,22 +211,27 @@ nonisolated enum DriveQuery {
             .replacingOccurrences(of: "'", with: "\\'")
     }
 
-    static func items(in location: DriveLocation, mimeType: String) -> String {
+    static func items(in location: DriveLocation, mimeTypes: [String]) -> String {
         let scope = switch location {
         case .folder(let id): "'\(escape(id))' in parents"
         case .sharedWithMe: "sharedWithMe = true"
         case .starred: "starred = true"
         case .recent: "viewedByMeTime > '1970-01-01T00:00:00'"
         }
-        return "\(scope) and mimeType = '\(mimeType)' and trashed = false"
+        return "\(scope) and \(anyOf(mimeTypes)) and trashed = false"
     }
 
-    /// Docs and folders whose name or text contains `term`.
+    /// Readable files and folders whose name or text contains `term`.
     static func search(_ term: String) -> String {
         let value = escape(term.trimmingCharacters(in: .whitespacesAndNewlines))
         return "(name contains '\(value)' or fullText contains '\(value)')"
-            + " and (mimeType = '\(DriveMimeType.document)' or mimeType = '\(DriveMimeType.folder)')"
+            + " and \(anyOf(DriveMimeType.readable + [DriveMimeType.folder]))"
             + " and trashed = false"
+    }
+
+    private static func anyOf(_ mimeTypes: [String]) -> String {
+        let clauses = mimeTypes.map { "mimeType = '\(escape($0))'" }
+        return clauses.count == 1 ? clauses[0] : "(\(clauses.joined(separator: " or ")))"
     }
 }
 
@@ -147,6 +242,8 @@ nonisolated enum GoogleDriveClient {
         case missingPermission
         case apiDisabled
         case notFound
+        case exportTooLarge
+        case notDownloadable
         case http(Int)
 
         var errorDescription: String? {
@@ -154,11 +251,15 @@ nonisolated enum GoogleDriveClient {
             case .unauthorized:
                 "Google sign-in expired. Sign in again in Settings."
             case .missingPermission:
-                "NoteFlash doesn't have permission to list your Google Docs yet."
+                "NoteFlash doesn't have permission to read your Google Drive files yet. Tap Allow Access in Settings → Google Account."
             case .apiDisabled:
                 "The Google Drive API isn't turned on for NoteFlash's Google Cloud project. Enable it under APIs & Services → Library → Google Drive API."
             case .notFound:
                 "That item isn't available in Google Drive."
+            case .exportTooLarge:
+                "This file is too large for Google Drive to convert."
+            case .notDownloadable:
+                "The owner of this file has turned off downloading, so NoteFlash can't read it."
             case .http(let status):
                 "Google Drive returned an error (\(status))."
             }
@@ -220,6 +321,50 @@ nonisolated enum GoogleDriveClient {
     }
 
     @concurrent
+    static func metadata(accessToken: String, id: String) async throws -> DriveFileMetadata {
+        let data = try await get(
+            path: "files/\(id)",
+            queryItems: [
+                URLQueryItem(name: "fields", value: "id,name,mimeType,version,size,capabilities/canDownload"),
+                URLQueryItem(name: "supportsAllDrives", value: "true"),
+            ],
+            accessToken: accessToken
+        )
+        let file = try JSONDecoder().decode(MetadataResponse.self, from: data)
+        return DriveFileMetadata(
+            id: file.id,
+            name: file.name ?? "Untitled",
+            mimeType: file.mimeType ?? "",
+            version: file.version,
+            size: file.size.flatMap(Int.init),
+            canDownload: file.capabilities?.canDownload ?? true
+        )
+    }
+
+    /// A file's bytes (for PDFs and PowerPoint files). Needs the drive.readonly scope.
+    @concurrent
+    static func download(accessToken: String, id: String) async throws -> Data {
+        try await get(
+            path: "files/\(id)",
+            queryItems: [
+                URLQueryItem(name: "alt", value: "media"),
+                URLQueryItem(name: "supportsAllDrives", value: "true"),
+            ],
+            accessToken: accessToken
+        )
+    }
+
+    /// A Google Workspace file converted to `mimeType` (Drive caps exports at 10 MB).
+    @concurrent
+    static func export(accessToken: String, id: String, mimeType: String) async throws -> Data {
+        try await get(
+            path: "files/\(id)/export",
+            queryItems: [URLQueryItem(name: "mimeType", value: mimeType)],
+            accessToken: accessToken
+        )
+    }
+
+    @concurrent
     static func thumbnailData(accessToken: String, link: String) async throws -> Data {
         guard let url = URL(string: link) else { throw DriveError.notFound }
         var request = URLRequest(url: url)
@@ -249,6 +394,10 @@ nonisolated enum GoogleDriveClient {
         switch status {
         case 401:
             return .unauthorized
+        case 403 where reasons.contains("exportsizelimitexceeded"):
+            return .exportTooLarge
+        case 403 where reasons.contains(where: { $0 == "cannotdownloadfile" || $0 == "filenotdownloadable" || $0 == "cannotexportfile" }):
+            return .notDownloadable
         case 403 where reasons.contains(where: { $0.contains("insufficient") })
             || message.contains("insufficient"):
             return .missingPermission
@@ -315,6 +464,16 @@ nonisolated enum GoogleDriveClient {
 
     private struct FileName: Decodable {
         let name: String
+    }
+
+    private struct MetadataResponse: Decodable {
+        struct Capabilities: Decodable { let canDownload: Bool? }
+        let id: String
+        let name: String?
+        let mimeType: String?
+        let version: String?
+        let size: String?
+        let capabilities: Capabilities?
     }
 
     private struct ErrorEnvelope: Decodable {

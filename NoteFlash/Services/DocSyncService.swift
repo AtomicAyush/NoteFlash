@@ -4,7 +4,7 @@ import Observation
 import SwiftData
 import UIKit
 
-/// Keeps decks in step with their notes: polls linked Google Docs while the app is open,
+/// Keeps decks in step with their notes: polls linked Google Drive files while the app is open,
 /// checks again from background app refresh, and has the AI engine revise only the affected cards.
 @Observable
 final class DocSyncService {
@@ -21,16 +21,18 @@ final class DocSyncService {
     }
 
     private(set) var busyDeckIDs: Set<UUID> = []
-    /// Called when a linked doc changed while the app is open, so the update can run as a
+    /// Called when a linked file changed while the app is open, so the update can run as a
     /// visible processing job. Without it, updates run inline.
-    var onDocChanged: ((Deck, GoogleDocContent) -> Void)?
+    var onDocChanged: ((Deck, DriveFileContent) -> Void)?
     private let container: ModelContainer
     private let googleAuth: GoogleAuth
+    private let reader: DriveFileReader
     private var pollTask: Task<Void, Never>?
 
     init(container: ModelContainer, googleAuth: GoogleAuth) {
         self.container = container
         self.googleAuth = googleAuth
+        reader = DriveFileReader(auth: googleAuth)
     }
 
     private var context: ModelContext { container.mainContext }
@@ -67,7 +69,7 @@ final class DocSyncService {
         await syncAllLinkedDecks()
     }
 
-    // MARK: Google Doc sync
+    // MARK: Google Drive sync
 
     func syncAllLinkedDecks() async {
         let descriptor = FetchDescriptor<Deck>(
@@ -75,18 +77,23 @@ final class DocSyncService {
         )
         guard let decks = try? context.fetch(descriptor) else { return }
         for deck in decks where !Task.isCancelled {
+            if deck.sourceKind != .googleDoc, !googleAuth.hasDriveAccess,
+               let checked = deck.lastCheckedAt,
+               Date.now.timeIntervalSince(checked) < AppConfig.publicFileSyncInterval {
+                continue
+            }
             _ = try? await sync(deck)
         }
     }
 
-    /// Checks one linked doc. If it changed, the update is handed to `onDocChanged` while the
-    /// app is open, or applied here otherwise. Returns whether the doc changed.
+    /// Checks one linked file. If it changed, the update is handed to `onDocChanged` while the
+    /// app is open, or applied here otherwise. Returns whether the file changed.
     @discardableResult
     func sync(_ deck: Deck) async throws -> Bool {
-        guard let documentID = deck.googleDocID, !isBusy(deck) else { return false }
-        let document: GoogleDocContent
+        guard let reference = deck.driveReference, !isBusy(deck) else { return false }
+        let content: DriveFileContent?
         do {
-            document = try await fetchDocument(id: documentID)
+            content = try await readIfChanged(reference, knownVersion: deck.sourceVersion)
         } catch {
             if !deck.isGone {
                 deck.lastSyncError = error.localizedDescription
@@ -97,25 +104,32 @@ final class DocSyncService {
         guard !deck.isGone else { return false }
         deck.lastCheckedAt = .now
 
-        guard TextDiff.fingerprint(of: document.text) != deck.sourceHash else {
+        guard let content, TextDiff.fingerprint(of: content.text) != deck.sourceHash else {
+            // Unchanged, or changed in ways that don't affect the text (like formatting).
+            if let content {
+                deck.sourceVersion = content.version
+                if let pdf = content.pdfData { deck.sourcePDF = pdf }
+            }
             deck.lastSyncError = nil
             save()
             return false
         }
         if let onDocChanged, UIApplication.shared.applicationState == .active {
-            onDocChanged(deck, document)
+            onDocChanged(deck, content)
         } else {
-            try await applyDocChange(to: deck, text: document.text)
+            try await applyDocChange(to: deck, content: content)
         }
         return true
     }
 
-    /// Revises a linked deck to match the doc's new text.
-    func applyDocChange(to deck: Deck, text: String, reporter: ProcessingReporter = .silent) async throws {
+    /// Revises a linked deck to match its file's new contents.
+    func applyDocChange(to deck: Deck, content: DriveFileContent, reporter: ProcessingReporter = .silent) async throws {
         try await exclusively(deck) {
             do {
-                _ = try await revise(deck, toMatch: text, reporter: reporter)
-                deck.sourceHash = TextDiff.fingerprint(of: text)
+                _ = try await revise(deck, toMatch: content.text, reporter: reporter)
+                deck.sourceHash = TextDiff.fingerprint(of: content.text)
+                deck.sourceVersion = content.version
+                if let pdf = content.pdfData { deck.sourcePDF = pdf }
                 deck.lastSyncError = nil
                 save()
             } catch {
@@ -128,35 +142,26 @@ final class DocSyncService {
         }
     }
 
-    /// Reads a doc through the Docs API when signed in, falling back to the public export link.
-    func fetchDocument(id: String) async throws -> GoogleDocContent {
+    /// Reads a linked Drive file: Docs, Slides, PDFs, or PowerPoint files.
+    func fetchContent(_ reference: DriveFileReference, reporter: ProcessingReporter = .silent) async throws -> DriveFileContent {
         #if DEBUG
         if UITestSupport.isEnabled {
-            return try await SampleDriveDataSource().document(id: id, auth: googleAuth)
+            let item = DriveItem(id: reference.id, name: reference.name ?? "Sample", mimeType: reference.kind.map(\.mimeType) ?? DriveMimeType.document)
+            return try await SampleDriveDataSource().content(of: item, auth: googleAuth)
         }
         #endif
-        guard googleAuth.isSignedIn else {
-            return try await GoogleDocsClient.fetchPublicExport(documentID: id)
+        return try await reader.read(reference) { phase in
+            reporter.send(.phase(phase))
         }
-        do {
-            let token = try await googleAuth.validAccessToken()
-            return try await GoogleDocsClient.fetchViaAPI(documentID: id, accessToken: token)
-        } catch let error as GoogleDocsClient.DocsError {
-            switch error {
-            case .unauthorized:
-                googleAuth.invalidateAccessToken()
-                let token = try await googleAuth.validAccessToken()
-                return try await GoogleDocsClient.fetchViaAPI(documentID: id, accessToken: token)
-            case .notShared, .notFound:
-                // This account can't open the doc, but it may still be shared by link.
-                if let document = try? await GoogleDocsClient.fetchPublicExport(documentID: id) {
-                    return document
-                }
-                throw error
-            default:
-                throw error
-            }
+    }
+
+    private func readIfChanged(_ reference: DriveFileReference, knownVersion: String?) async throws -> DriveFileContent? {
+        #if DEBUG
+        if UITestSupport.isEnabled {
+            return try await fetchContent(reference)
         }
+        #endif
+        return try await reader.readIfChanged(reference, knownVersion: knownVersion)
     }
 
     // MARK: Edited notes and regeneration
@@ -175,28 +180,27 @@ final class DocSyncService {
     func regenerate(_ deck: Deck, reporter: ProcessingReporter = .silent) async throws {
         try await exclusively(deck) {
             var notes = deck.sourceText
-            let source: NoteSource
-            switch deck.sourceKind {
-            case .text:
-                source = .text(notes)
-            case .pdf:
-                if let data = deck.sourcePDF {
-                    source = .pdf(data: data, text: notes)
-                } else {
-                    source = .text(notes)
-                }
-            case .googleDoc:
-                guard let documentID = deck.googleDocID else { return }
-                reporter.send(.phase("Opening your Google Doc"))
-                notes = try await fetchDocument(id: documentID).text
-                source = .text(notes)
+            var latest: DriveFileContent?
+            if let reference = deck.driveReference {
+                reporter.send(.phase("Opening your \(deck.sourceKind.label)"))
+                let content = try await fetchContent(reference, reporter: reporter)
+                notes = content.text
+                if let pdf = content.pdfData { deck.sourcePDF = pdf }
+                latest = content
+            }
+            let source: NoteSource = if let pdf = deck.sourcePDF, deck.sourceKind == .pdf || deck.sourceKind == .drivePDF {
+                .pdf(data: pdf, text: notes)
+            } else {
+                .text(notes)
             }
 
             let engineKind = AIEngineKind.selected
             let engine = try engineKind.makeEngine()
-            let characters = engineKind == .claude && deck.sourceKind == .pdf && notes.count < 200
-                ? (deck.sourcePDF.flatMap { PDFTextExtractor.pageCount(of: $0) }).map(ProcessingEstimator.estimatedCharacters(pdfPages:)) ?? notes.count
-                : notes.count
+            let characters = if case .pdf(let data, _) = source {
+                DeckCreator.workload(forPDF: data, pages: PDFTextExtractor.pageCount(of: data) ?? 0, text: notes, engine: engineKind)
+            } else {
+                notes.count
+            }
             reporter.send(.workload(characters: characters, engine: engineKind))
             let generated = try await engine.generateDeck(
                 from: source, density: deck.density, progress: reporter.generationHandler
@@ -212,8 +216,9 @@ final class DocSyncService {
                 deck.addCard(front: card.front, back: card.back)
             }
             deck.sourceText = notes
-            if deck.sourceKind == .googleDoc {
+            if let latest {
                 deck.sourceHash = TextDiff.fingerprint(of: notes)
+                deck.sourceVersion = latest.version
                 deck.lastCheckedAt = .now
                 deck.lastSyncError = nil
             }

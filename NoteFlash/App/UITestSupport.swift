@@ -89,6 +89,9 @@ struct SampleDriveDataSource: DriveDataSource {
         doc("d-schedule", "Class Schedule", parent: "f-school", modified: ago(200), opened: ago(3)),
         doc("d-cells", "Cell Biology Notes", parent: "f-bio", modified: ago(0.5), opened: ago(0.4), starred: true),
         doc("d-photo", "Photosynthesis Review", parent: "f-bio", modified: ago(26), opened: ago(25)),
+        doc("s-mitosis", "Mitosis Lecture", parent: "f-bio", modified: ago(4), opened: ago(3), mimeType: DriveMimeType.presentation),
+        doc("p-enzymes", "Enzymes Handout.pdf", parent: "f-bio", modified: ago(60), mimeType: DriveMimeType.pdf),
+        doc("x-ecology", "Ecology Review.pptx", parent: "f-bio", modified: ago(120), mimeType: DriveMimeType.powerPoint),
         doc("d-genetics", "Genetics Unit 4", parent: "f-bio", modified: ago(80), modifier: "Priya Shah"),
         doc("d-lab", "Lab Report Draft", parent: "f-bio", modified: ago(500)),
         doc("d-revolution", "American Revolution Notes", parent: "f-history", modified: ago(10), opened: ago(9), starred: true),
@@ -124,9 +127,9 @@ struct SampleDriveDataSource: DriveDataSource {
 
     private static func doc(
         _ id: String, _ name: String, parent: String?, modified: Date, opened: Date? = nil,
-        modifier: String? = nil, starred: Bool = false
+        modifier: String? = nil, starred: Bool = false, mimeType: String = DriveMimeType.document
     ) -> DriveItem {
-        DriveItem(id: id, name: name, mimeType: DriveMimeType.document, modifiedTime: modified,
+        DriveItem(id: id, name: name, mimeType: mimeType, modifiedTime: modified,
                   modifiedByMeTime: modifier == nil ? modified : nil, viewedByMeTime: opened, ownedByMe: true,
                   ownerName: "You", lastModifierName: modifier, lastModifiedByMe: modifier == nil,
                   parentID: parent, starred: starred)
@@ -171,10 +174,34 @@ struct SampleDriveDataSource: DriveDataSource {
         return name
     }
 
-    func document(id: String, auth: GoogleAuth) async throws -> GoogleDocContent {
+    func content(of item: DriveItem, auth: GoogleAuth) async throws -> DriveFileContent {
         try await Task.sleep(for: .milliseconds(400))
-        let name = Self.items.first { $0.id == id }?.name ?? "Doc"
-        return GoogleDocContent(title: name, text: """
+        let known = Self.items.first { $0.id == item.id } ?? item
+        let name = DriveFileReader.stripExtension(known.name)
+        switch known.kind ?? .document {
+        case .presentation, .powerPoint:
+            return DriveFileContent(title: name, text: """
+                ## \(name)
+                A tour of cell division
+
+                ## Phases of mitosis
+                • Prophase: chromosomes condense
+                • Metaphase: chromosomes line up at the middle
+                • Anaphase: sister chromatids separate
+                • Telophase: two nuclei form
+                Speaker notes: Cytokinesis usually overlaps with telophase.
+                """, kind: known.kind ?? .presentation, pageCount: 2)
+        case .pdf:
+            return DriveFileContent(title: name, text: """
+                Enzymes are proteins that speed up chemical reactions.
+                The active site is where the substrate binds.
+                Enzymes lower the activation energy of a reaction.
+                High temperatures can denature enzymes.
+                """, kind: .pdf, pageCount: 1)
+        case .document:
+            break
+        }
+        return DriveFileContent(title: name, text: """
             # \(name)
             ## Overview
             These are sample notes for previewing a Google Doc in NoteFlash.
@@ -185,7 +212,7 @@ struct SampleDriveDataSource: DriveDataSource {
             Photosynthesis | Converts light energy into chemical energy
             Chlorophyll | Green pigment that absorbs light
             The Calvin cycle takes place in the stroma and uses ATP and NADPH to build sugars.
-            """)
+            """, kind: .document)
     }
 
     func thumbnail(for item: DriveItem, auth: GoogleAuth) async -> UIImage? { nil }
