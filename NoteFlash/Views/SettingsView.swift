@@ -11,6 +11,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(DocSyncService.self) private var sync
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
+    @AppStorage(ClaudeFallback.storageKey) private var finishWithClaude = true
 
     @State private var apiKeyInput = ""
     @State private var hasSavedKey = KeychainStore.string(for: .anthropicAPIKey) != nil
@@ -64,13 +65,16 @@ struct SettingsView: View {
                     Label("Ready on this iPhone", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 }
+                if hasSavedKey {
+                    Toggle("Finish with Claude when limited", isOn: $finishWithClaude)
+                }
             }
         } header: {
             Text("AI Model")
         } footer: {
             switch engine {
             case .apple:
-                Text("Free and private: cards are written on this iPhone and your notes never leave it. Requires an iPhone that supports Apple Intelligence. Long notes are handled in sections.")
+                Text("Free and private: cards are written on this iPhone and your notes never leave it. Requires an iPhone that supports Apple Intelligence. Long notes are handled in sections.\n\niOS limits how much on-device AI an app may use in a stretch, which pauses long decks until the limit resets. \(hasSavedKey ? "With this on, the rest of the deck is written by Claude instead of waiting (billed to your Anthropic account)." : "Add a Claude API key below to have NoteFlash finish those decks with Claude instead of waiting.")")
             case .claude:
                 Text("Uses Claude with your own API key (usage is billed to your Anthropic account). Best for very long notes, scanned PDFs, and diagrams.")
             }

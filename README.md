@@ -17,6 +17,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Handwriting:** in PDFs from note-taking apps, handwriting is read along with typed text. Several images become one deck with a page per image.
   - **Open in NoteFlash:** apps that offer "Open in…" can also send PDFs, images, PowerPoint, and text files straight to the New Deck screen.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
+  - **When Apple Intelligence needs a break:** iOS limits how much on-device AI an app may use in a stretch. NoteFlash waits out short limits, and with a Claude API key saved it can finish the deck with Claude instead of pausing (Settings → **Finish with Claude when limited**).
 - **Comments and exam priorities (Google Docs and Slides):** comments and replies are read along with the notes, since they often hold extra notes.
   - **Exam priorities:** comments that say a point will be on the exam, test, quiz, midterm, or final (or say "important", "know this", or "high-yield") mark that point as an exam priority, and so do lines in the notes that say so.
   - **Coverage:** every exam priority gets cards, even in a compact deck.
@@ -150,6 +151,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
   - **Long limits:** if the wait would be longer than 4 minutes, the job pauses. It resumes on its own at the reset time while the app is open, and a notification says when it can continue.
   - **No repeated work:** finished sections are kept (`SectionCache`), so a resumed or retried job skips them. Optional extra passes are skipped for 15 minutes after a limit.
   - **In the background:** Apple Intelligence rate-limits apps that aren't in the foreground, so background runs get through less before pausing. Each run still adds finished sections, and the job continues on the next one.
+  - **Fewer requests:** every request counts against the limit, so the deck's name comes from the notes' heading or a section's own title when there is one, and exam-priority passes are skipped for points that already have a card once a limit has been hit.
+  - **Finishing with Claude:** when a section hits a limit too long to wait out and a Claude API key is saved, that section is written by Claude and the job carries on instead of pausing. Sections already written on the device are kept.
   - **Shorter responses:** each request caps its response length, so a model that starts repeating itself stops early.
 - **Stalls:** the model service sometimes stops mid-response for a minute or more. Responses are consumed on a separate task and watched. A response with no output for 20 seconds (45 before the first output) is cancelled and retried, up to twice. If it already wrote a good share of the section's cards, those are kept instead. Non-streaming requests get the same timeout.
 - **Diagnostics:** `DiagnosticsLog` records job events and full error descriptions to the system log (subsystem `com.ayushkansal.NoteFlash`) and to `Documents/NoteFlash-processing-log.txt`.

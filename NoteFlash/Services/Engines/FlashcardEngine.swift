@@ -140,6 +140,26 @@ nonisolated enum AIEngineKind: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Finishing a job with Claude when iOS says Apple Intelligence needs a break, so a long job
+/// doesn't stop partway. It only does anything when a Claude API key is saved.
+nonisolated enum ClaudeFallback {
+    static let storageKey = "finishWithClaudeWhenLimited"
+
+    /// On unless the user turned it off.
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: storageKey) as? Bool ?? true
+    }
+
+    static var isAvailable: Bool {
+        KeychainStore.string(for: .anthropicAPIKey) != nil
+    }
+
+    static func engine() -> (any FlashcardEngine)? {
+        guard isEnabled, let client = try? AnthropicClient.fromKeychain() else { return nil }
+        return ClaudeFlashcardEngine(client: client)
+    }
+}
+
 // MARK: - Card writing guidance shared by both engines
 
 nonisolated enum CardWriting {

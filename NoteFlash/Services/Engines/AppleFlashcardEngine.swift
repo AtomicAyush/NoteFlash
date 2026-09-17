@@ -179,6 +179,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         case cards(Int)
         /// Waiting out the usage limit until this time.
         case waiting(Date)
+        /// Something worth showing instead of the section's own progress.
+        case detail(String)
     }
 
     static func waitingDetail(until date: Date) -> String {
@@ -232,7 +234,11 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             ) {
                 Self.onDeviceSession(instructions)
             }
-            if chunks.count > 1 || deck.title.isEmpty {
+            // A heading names the deck for free, and a section already suggested one; asking the
+            // model costs a request, so that's only for notes that give us neither.
+            if let heading = Self.headingTitle(in: notes) {
+                deck = GeneratedDeck(title: heading, cards: deck.cards)
+            } else if deck.title.isEmpty {
                 progress?(GenerationProgress(fraction: 0.98, detail: "Naming your deck"))
                 if let title = try? await Self.deckTitle(for: notes) {
                     deck = GeneratedDeck(title: title, cards: deck.cards)
@@ -339,6 +345,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 case .waiting(let until):
                     let overall = Double(index) / Double(parts.count) * 0.97
                     progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
+                case .detail(let text):
+                    report(0.5, text)
                 }
             }
             report(0, label)
@@ -401,7 +409,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             throw blockedSections > 0 ? EngineError.blockedBySafetyFilter : DeckCreator.CreationError.noCards
         }
         var deckTitle = contextTitle ?? title ?? ""
-        if contextTitle == nil, parts.count > 1 {
+        if contextTitle == nil, deckTitle.isEmpty, parts.count > 1 {
             progress?(GenerationProgress(fraction: 0.98, detail: "Naming your deck"))
             let allText = details.pages.map(\.text).joined(separator: "\n")
             if let named = try? await Self.deckTitle(for: allText) { deckTitle = named }
@@ -530,6 +538,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                         case .waiting(let until):
                             let overall = Double(index) / Double(chunks.count) * 0.97
                             progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
+                        case .detail(let text):
+                            report(0.5, text)
                         }
                     },
                     makeSession: makeSession
@@ -601,6 +611,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 cards = Self.merging(Self.faithful(extra, to: text), into: cards)
             }
             return SectionCards(title: sets.first?.title, cards: Array(cards.prefix(cap)))
+        } catch let error as EngineError where Self.isUsageLimit(error) {
+            // Apple Intelligence needs a break. Rather than pausing everything, finish this
+            // section with Claude when the user has set that up.
+            guard let claude = ClaudeFallback.engine() else { throw error }
+            onEvent(.detail("Apple Intelligence needs a break · finishing with Claude"))
+            let deck = try await claude.generateDeck(from: .text(text), density: density, progress: nil)
+            return SectionCards(title: deck.title, cards: deck.cards)
         } catch where AppleModelFailure(error).allowsPlainTextRetry {
             var cards: [GeneratedCard] = []
             var plainTextError: Error?
@@ -655,6 +672,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             // Exam points get their own pass even when already covered: one quick card isn't
             // enough for something the student will be tested on.
             let covered = written.contains { PriorityNotes.isPriority(front: $0.front, back: $0.back, items: [item]) }
+            // Near the usage limit, these requests are better spent on points with no card yet.
+            if covered, ModelLimits.wasLimitedRecently { continue }
             let context = PriorityNotes.context(for: item, in: text)
             let request = "The student was told this point will be on the exam: “\(CommentWeaver.clean(item.topic))”. Write 1 to 3 flashcards that test it thoroughly from different angles, using these notes. Each answer must be the specific fact the question asks for."
             do {
@@ -711,6 +730,11 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     /// endless variations ("How does X affect plant growth / height / roots…").
     private static func maximumCardCount(for text: String, density: CardDensity) -> Int {
         max(4, estimatedCardCount(for: text, density: density) * 2)
+    }
+
+    private static func isUsageLimit(_ error: EngineError) -> Bool {
+        if case .rateLimited = error { return true }
+        return false
     }
 
     /// Whether a section's cards leave enough of it uncovered to be worth a second pass over the
@@ -960,13 +984,17 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         }
     }
 
-    /// Names a multi-section deck: its top-level heading if it opens with one, otherwise a
-    /// model-suggested title based on its headings (or its opening, if it has none).
+    /// The notes' own top-level heading, which names the deck without asking the model.
+    static func headingTitle(in notes: String) -> String? {
+        guard let first = TextDiff.lines(of: notes).first, first.hasPrefix("# ") else { return nil }
+        let heading = first.dropFirst(2).trimmingCharacters(in: .whitespaces)
+        return heading.isEmpty ? nil : String(heading.prefix(80))
+    }
+
+    /// Names a multi-section deck from its headings (or its opening, if it has none). This costs
+    /// a request, so it's only used when nothing else named the deck.
     private static func deckTitle(for notes: String) async throws -> String? {
-        if let first = TextDiff.lines(of: notes).first, first.hasPrefix("# ") {
-            let heading = first.dropFirst(2).trimmingCharacters(in: .whitespaces)
-            if !heading.isEmpty { return String(heading.prefix(80)) }
-        }
+        if let heading = headingTitle(in: notes) { return heading }
         let headings = TextDiff.lines(of: notes)
             .filter { $0.hasPrefix("#") }
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ")) }
@@ -1034,6 +1062,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                             case .waiting(let until):
                                 let overall = (Double(index) + 0.35) / Double(hunks.count) * 0.98
                                 progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
+                            case .detail(let text): report(0.35, text)
                             }
                         },
                         into: &revision
