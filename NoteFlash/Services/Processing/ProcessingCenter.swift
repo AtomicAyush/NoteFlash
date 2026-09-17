@@ -98,6 +98,15 @@ final class ProcessingJob: Identifiable {
         estimator?.remaining(fraction: reportedFraction, now: date)
     }
 
+    /// True once a job has been going a moment without iOS granting background time, which means
+    /// leaving the app will stop it shortly.
+    var needsTheAppOpen: Bool {
+        !continuesInBackground && Date.now.timeIntervalSince(startedAt) > 5
+    }
+
+    /// The engine writing this deck, once it's known.
+    var engine: AIEngineKind? { estimator?.engine }
+
     /// "About 40 sec left · Section 2 of 5"
     func statusLine(at date: Date = .now) -> String {
         // A time estimate means little while waiting out a usage limit.

@@ -132,6 +132,21 @@ struct ProcessingJobRow: View {
         .controlSize(.small)
     }
 
+    /// What leaving the app would mean for this job. Apple Intelligence is rate-limited for apps
+    /// in the background, so a deck that keeps going still finishes sooner with the app open.
+    @ViewBuilder
+    private var backgroundHint: some View {
+        if job.continuesInBackground {
+            if job.engine == .apple {
+                Label("Keeps going if you leave NoteFlash, but finishes sooner while it's open", systemImage: "arrow.up.forward.app")
+            } else {
+                Label("Keeps going if you leave NoteFlash", systemImage: "arrow.up.forward.app")
+            }
+        } else if job.needsTheAppOpen {
+            Label("Keep NoteFlash open to finish this", systemImage: "iphone")
+        }
+    }
+
     private var running: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 8) {
@@ -166,11 +181,9 @@ struct ProcessingJobRow: View {
                 } else {
                     ProgressView(value: 0.02)
                 }
-                if job.continuesInBackground {
-                    Label("Keeps going if you leave NoteFlash", systemImage: "arrow.up.forward.app")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                backgroundHint
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
             .accessibilityElement(children: .combine)

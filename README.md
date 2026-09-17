@@ -33,7 +33,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Learn:** rounds that start with multiple choice and move to typed or self-graded recall.
   - **Match:** a timed matching game with penalties for wrong matches and a best time.
 - **Background processing:** new decks, regenerated decks, note edits, and Google Drive updates all run as background jobs. The deck list shows each job's progress and time left.
-  - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen.
+  - **Leaving the app:** jobs keep running, with progress in the Dynamic Island and on the Lock Screen. The job says so, and says that Apple Intelligence finishes sooner while the app is open — iOS rate-limits it for apps in the background. When iOS hasn't granted background time, the job says to keep the app open instead.
   - **Nothing is lost:** unfinished work is written down, so closing NoteFlash — or iOS stopping it — doesn't throw it away. Sections that were already written are kept, and the job picks up from there.
   - **If iOS stops background work:** NoteFlash asks iOS for more background time and carries on when it's granted, without you opening the app. Opening the app always starts it again right away.
   - **Notes shared from another app:** NoteFlash asks iOS to start it in the background and make the cards, so the notification is a shortcut, not a requirement. (iOS runs this when the device is idle, and not at all if NoteFlash was force-quit from the app switcher.)
