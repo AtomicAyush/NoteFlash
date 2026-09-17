@@ -170,7 +170,25 @@ struct NewDeckView: View {
             Text("When the doc changes, NoteFlash updates the affected cards and adds cards for new material. Cards you edit by hand are never overwritten.")
         }
 
-        GoogleAccountSection()
+        Section {
+            DisclosureGroup("How to share a doc by link") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Open the doc in Google Docs and tap **Share**.", systemImage: "1.circle")
+                    Label("Under **General access**, choose **Anyone with the link** (Viewer is enough).", systemImage: "2.circle")
+                    Label("Tap **Copy link**, then tap **Paste** above.", systemImage: "3.circle")
+                }
+                .font(.subheadline)
+                .padding(.vertical, 4)
+            }
+        } footer: {
+            Text(googleAuth.isConfigured
+                ? "Docs shared by link work without signing in. Sign in below to use private docs instead."
+                : "NoteFlash reads docs shared as “Anyone with the link can view”. Anyone with the link can read the doc, so avoid sharing private information this way.")
+        }
+
+        if googleAuth.isConfigured {
+            GoogleAccountSection()
+        }
     }
 
     // MARK: Actions

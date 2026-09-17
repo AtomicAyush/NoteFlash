@@ -23,7 +23,9 @@ nonisolated enum GoogleDocsClient {
             case .unauthorized:
                 "Google sign-in expired. Sign in again in Settings."
             case .notShared:
-                "This doc is private. Sign in with Google in Settings, or share the doc as \"Anyone with the link can view\"."
+                AppConfig.googleClientID.isEmpty
+                    ? "This doc is private. In Google Docs, tap Share, set General access to \"Anyone with the link\", and paste the link again."
+                    : "This doc is private. Sign in with Google in Settings, or set its General access to \"Anyone with the link\"."
             case .notFound:
                 "Google Docs couldn't find that document. It may have been deleted or you may not have access."
             case .apiDisabled(let message):
@@ -92,7 +94,8 @@ nonisolated enum GoogleDocsClient {
                 throw DocsError.notShared
             }
             let cleaned = text.replacingOccurrences(of: "\u{FEFF}", with: "")
-            return GoogleDocContent(title: nil, text: cleaned)
+            let title = documentTitle(fromContentDisposition: http.value(forHTTPHeaderField: "Content-Disposition"))
+            return GoogleDocContent(title: title, text: cleaned)
         case 401, 403:
             throw DocsError.notShared
         case 404:
@@ -100,6 +103,27 @@ nonisolated enum GoogleDocsClient {
         default:
             throw DocsError.http(http.statusCode)
         }
+    }
+}
+
+nonisolated extension GoogleDocsClient {
+    /// The doc's name from an export's download filename, e.g.
+    /// `attachment; filename="Notes.txt"; filename*=UTF-8''My%20Notes.txt` → "My Notes".
+    static func documentTitle(fromContentDisposition header: String?) -> String? {
+        guard let header else { return nil }
+        var filename: String?
+        for part in header.split(separator: ";").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if part.lowercased().hasPrefix("filename*="),
+               let encoded = part.split(separator: "'", maxSplits: 2).last {
+                filename = String(encoded).removingPercentEncoding
+                break
+            } else if part.lowercased().hasPrefix("filename=") {
+                filename = String(part.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+        }
+        guard var name = filename?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return nil }
+        if name.lowercased().hasSuffix(".txt") { name.removeLast(4) }
+        return name.isEmpty ? nil : name
     }
 }
 

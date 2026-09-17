@@ -26,15 +26,15 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF, or
 
 1. Open `NoteFlash.xcodeproj`, choose your iPhone, and press Run.
 2. (Optional) To use **Claude**, open Settings, switch "Write cards with" to Claude, and paste an API key from [console.anthropic.com](https://console.anthropic.com/settings/keys). The key is stored only in the device Keychain. The model is set in `AppConfig.claudeModel`.
-3. (Optional) **Google Docs:** see below. Docs shared as "Anyone with the link can view" work without any setup.
+3. **Google Docs, no setup needed:** share the doc by link, then paste the link into NoteFlash's **Google Doc** tab. In Google Docs, tap **Share**, set **General access** to **Anyone with the link** (Viewer), and tap **Copy link**. NoteFlash reads the doc's text and name from the link and keeps checking it for changes. Anyone with the link can read the doc, so use the setup below for private notes.
 
-### Google Docs setup (private docs)
+### Google Docs setup (private docs, optional)
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Docs API**.
 2. Under **OAuth consent screen**, choose *External*, fill in the app name, and add your Google account as a **test user**.
 3. Under **Credentials**, create an **OAuth client ID** of type **iOS**, with bundle ID `com.ayushkansal.NoteFlash`.
 4. Paste the client ID (`…apps.googleusercontent.com`) into `AppConfig.googleClientID`.
-5. In the app, go to Settings and choose **Sign in with Google**. NoteFlash asks only for read-only Docs access.
+5. In the app, go to Settings and choose **Sign in with Google**. This option appears once a client ID is set. NoteFlash asks only for read-only Docs access.
 
 While the consent screen is in *Testing* mode, Google expires refresh tokens after 7 days, so you'll need to sign in again weekly. Publishing the app removes that limit.
 
