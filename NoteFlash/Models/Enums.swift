@@ -46,6 +46,36 @@ nonisolated enum SourceKind: String, Identifiable, Sendable {
     }
 }
 
+/// Ways to order the deck list, following Google Drive's sort options.
+nonisolated enum DeckSort: String, CaseIterable, Identifiable, Sendable {
+    case name
+    case modified
+    case modifiedByMe
+    case opened
+    case created
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .name: "Name"
+        case .modified: "Last modified"
+        case .modifiedByMe: "Last modified by me"
+        case .opened: "Last opened by me"
+        case .created: "Date created"
+        }
+    }
+
+    var ascendingByDefault: Bool { self == .name }
+
+    func directionLabel(ascending: Bool) -> String {
+        switch self {
+        case .name: ascending ? "A to Z" : "Z to A"
+        default: ascending ? "Oldest first" : "Newest first"
+        }
+    }
+}
+
 /// How many cards the AI engine should write for a given amount of notes.
 nonisolated enum CardDensity: String, CaseIterable, Identifiable, Sendable {
     case essentials

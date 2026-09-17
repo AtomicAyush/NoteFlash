@@ -37,6 +37,26 @@ enum UITestSupport {
             deck.addCard(front: front, back: back)
         }
         deck.cards.first?.setBadge(.new)
+
+        // Older decks with different dates, for checking the deck list's sort options.
+        let history = Deck(title: "American Revolution", sourceKind: .googleDoc, sourceName: "American Revolution Notes",
+                           sourceText: "The Treaty of Paris ended the war in 1783.", density: .balanced)
+        history.createdAt = .now.addingTimeInterval(-86_400 * 30)
+        history.updatedAt = .now.addingTimeInterval(-3_600)
+        history.modifiedByMeAt = .now.addingTimeInterval(-86_400 * 20)
+        history.lastOpenedAt = .now.addingTimeInterval(-86_400 * 2)
+        history.googleDocID = "d-revolution"
+        history.autoSync = false
+        context.insert(history)
+        history.addCard(front: "What treaty ended the Revolutionary War?", back: "The Treaty of Paris (1783)")
+
+        let math = Deck(title: "Algebra Formulas", sourceKind: .text, sourceText: "The quadratic formula solves ax^2 + bx + c = 0.", density: .balanced)
+        math.createdAt = .now.addingTimeInterval(-86_400 * 10)
+        math.updatedAt = .now.addingTimeInterval(-86_400 * 10)
+        math.modifiedByMeAt = .now.addingTimeInterval(-86_400 * 10)
+        math.lastOpenedAt = nil
+        context.insert(math)
+        math.addCard(front: "What does the quadratic formula solve?", back: "ax^2 + bx + c = 0")
         try? context.save()
     }
 }
@@ -102,6 +122,7 @@ struct SampleDriveDataSource: DriveDataSource {
             item.ownedByMe = false
             item.ownerName = "Jordan Lee"
             item.shared = true
+            item.sharedWithMeTime = ago(70)
             return item
         }(),
         {
@@ -109,6 +130,8 @@ struct SampleDriveDataSource: DriveDataSource {
             item.ownedByMe = false
             item.ownerName = "Ms. Rivera"
             item.shared = true
+            item.sharedWithMeTime = ago(30)
+            item.size = 48_000
             return item
         }(),
         {
@@ -130,7 +153,8 @@ struct SampleDriveDataSource: DriveDataSource {
         modifier: String? = nil, starred: Bool = false, mimeType: String = DriveMimeType.document
     ) -> DriveItem {
         DriveItem(id: id, name: name, mimeType: mimeType, modifiedTime: modified,
-                  modifiedByMeTime: modifier == nil ? modified : nil, viewedByMeTime: opened, ownedByMe: true,
+                  modifiedByMeTime: modifier == nil ? modified : nil, viewedByMeTime: opened,
+                  size: Int64(name.unicodeScalars.reduce(7) { ($0 * 31 + Int($1.value)) % 900_000 } + 2_000), ownedByMe: true,
                   ownerName: "You", lastModifierName: modifier, lastModifiedByMe: modifier == nil,
                   parentID: parent, starred: starred)
     }
@@ -148,18 +172,21 @@ struct SampleDriveDataSource: DriveDataSource {
 
     func requiresListPermission(_ auth: GoogleAuth) -> Bool { false }
 
-    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, auth: GoogleAuth) async throws -> DriveListing {
+    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, auth: GoogleAuth) async throws -> DriveListing {
         try await Task.sleep(for: .milliseconds(300))
         let found = Self.items.filter { matches($0, location) }
-        let order = location == .recent ? DriveSort.opened : sort
+        let order = location == .recent ? DriveSort.opened : sort.available(in: location)
         let isAscending = location == .recent ? false : ascending
+        guard foldersOnTop || location == .recent else {
+            return DriveListing(folders: [], docs: DrivePage(items: order.sorted(found, ascending: isAscending), nextPageToken: nil))
+        }
         return DriveListing(
             folders: order.sorted(found.filter(\.isFolder), ascending: isAscending),
             docs: DrivePage(items: order.sorted(found.filter { !$0.isFolder }, ascending: isAscending), nextPageToken: nil)
         )
     }
 
-    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage {
+    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage {
         DrivePage(items: [], nextPageToken: nil)
     }
 

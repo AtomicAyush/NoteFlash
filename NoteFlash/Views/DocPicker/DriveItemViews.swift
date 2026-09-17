@@ -4,6 +4,8 @@ import SwiftUI
 
 struct DriveFolderRow: View {
     let item: DriveItem
+    /// Shows the sort's date line when folders are mixed in with files.
+    let sort: DriveSort?
     let showsLocation: Bool
     let context: DrivePickerContext
 
@@ -15,6 +17,12 @@ struct DriveFolderRow: View {
                 Text(item.name)
                     .font(.body.weight(.medium))
                     .lineLimit(2)
+                if let sort {
+                    Text(DriveText.activity(for: item, sort: sort))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 DriveItemFootnote(item: item, showsLocation: showsLocation, context: context)
             }
         }
@@ -269,32 +277,41 @@ struct DeckBadge: View {
     }
 }
 
-/// Sort, order, and layout options, like Drive's view menu.
+/// Sort, order, folder, and layout options, like Drive's view menu.
 struct DriveViewOptionsMenu: View {
     @Binding var sortRaw: String
     @Binding var ascending: Bool
     @Binding var layoutRaw: String
-    let sortLocked: Bool
+    @Binding var foldersOnTop: Bool
+    /// The sorts offered here; empty where the order is fixed (Recent).
+    let sortOptions: [DriveSort]
+    let currentSort: DriveSort
 
-    private var sort: DriveSort { DriveSort(rawValue: sortRaw) ?? .modified }
+    private var isList: Bool { layoutRaw != DriveLayout.grid.rawValue }
 
     var body: some View {
         Menu {
-            if !sortLocked {
+            if !sortOptions.isEmpty {
                 Section("Sort By") {
-                    Picker("Sort By", selection: $sortRaw) {
-                        ForEach(DriveSort.allCases) { option in
-                            Text(option.label).tag(option.rawValue)
+                    Picker("Sort By", selection: Binding(
+                        get: { currentSort },
+                        set: { sortRaw = $0.rawValue }
+                    )) {
+                        ForEach(sortOptions) { option in
+                            Text(option.label).tag(option)
                         }
                     }
                     .pickerStyle(.inline)
                 }
-                Section("Order") {
-                    Picker("Order", selection: $ascending) {
-                        Text(sort.directionLabel(ascending: sort.ascendingByDefault))
-                            .tag(sort.ascendingByDefault)
-                        Text(sort.directionLabel(ascending: !sort.ascendingByDefault))
-                            .tag(!sort.ascendingByDefault)
+                SortOrderPicker(ascending: $ascending, ascendingByDefault: currentSort.ascendingByDefault) {
+                    currentSort.directionLabel(ascending: $0)
+                }
+            }
+            if isList && !sortOptions.isEmpty {
+                Section("Folders") {
+                    Picker("Folders", selection: $foldersOnTop) {
+                        Text("On top").tag(true)
+                        Text("Mixed with files").tag(false)
                     }
                     .pickerStyle(.inline)
                 }
@@ -310,7 +327,7 @@ struct DriveViewOptionsMenu: View {
             Label("Sort and View", systemImage: "arrow.up.arrow.down")
         }
         .onChange(of: sortRaw) {
-            ascending = sort.ascendingByDefault
+            ascending = currentSort.ascendingByDefault
         }
     }
 }
@@ -323,6 +340,10 @@ enum DriveText {
             item.viewedByMeTime.map { "You opened \(short($0))" } ?? "You haven't opened this"
         case .modifiedByMe:
             item.modifiedByMeTime.map { "You modified \(short($0))" } ?? "You haven't edited this"
+        case .shared:
+            item.sharedWithMeTime.map { "Shared with you \(short($0))" } ?? "Not shared with you"
+        case .storage:
+            item.isFolder ? "Folder" : size(item.size)
         case .name, .modified:
             modified(item)
         }
@@ -333,6 +354,12 @@ enum DriveText {
         if item.lastModifiedByMe { return "Modified \(short(date)) by you" }
         if let name = item.lastModifierName { return "Modified \(short(date)) by \(name)" }
         return "Modified \(short(date))"
+    }
+
+    /// "2.4 MB", as Drive shows storage used.
+    static func size(_ bytes: Int64?) -> String {
+        guard let bytes else { return "Size unknown" }
+        return bytes.formatted(.byteCount(style: .file))
     }
 
     /// "3:04 PM", "yesterday", "Sep 3", or "Sep 3, 2024".

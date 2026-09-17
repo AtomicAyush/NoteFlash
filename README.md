@@ -7,7 +7,9 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
 - **Three ways to add notes:**
   - **Text:** type or paste notes.
   - **File:** import a PDF (scanned pages go through on-device text recognition) or a PowerPoint (.pptx) file. Slides contribute their titles, text, tables, and speaker notes.
-  - **Google Drive:** use a Google Doc, Google Slides presentation, PDF, or PowerPoint file from Drive. Browse your Drive like the Drive app (My Drive folders, Shared, Starred, Recent), search by name or text, sort by name or date, switch between list and grid, and preview the text before using a file. You can also paste a link.
+  - **Google Drive:** use a Google Doc, Google Slides presentation, PDF, or PowerPoint file from Drive, or paste a link. Browse your Drive like the Drive app: My Drive folders, Shared, Starred, Recent, and search by name or text. Preview the text before using a file.
+    - **Sorting:** Name, Last modified, Last modified by me, Last opened by me, Storage used, and (in Shared) Date shared, in either direction.
+    - **View:** list or grid, with folders on top or mixed with files (list view).
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
 - **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
   - Cards you write or edit by hand are locked and never overwritten.
@@ -22,6 +24,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **When a job finishes in the background:** a notification lets you open the deck.
   - **Time estimates:** they learn how fast your device (or Claude) actually is.
   - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy. The log screen's **Check Apple Intelligence** button sends a few test requests to the on-device model and records the results.
+- **Deck list sorting:** Name, Last modified, Last modified by me, Last opened by me, or Date created, in either direction. Tap the list header to flip the order.
 - **Deck tools:** stars, a "study starred only" filter, search, editing notes (text decks), regenerating a deck, and resetting progress.
 
 ## Requirements

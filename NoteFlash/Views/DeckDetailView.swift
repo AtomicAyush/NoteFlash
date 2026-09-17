@@ -94,6 +94,7 @@ struct DeckDetailView: View {
             }
         }
         .navigationTitle(deck.title)
+        .onAppear { deck.lastOpenedAt = .now }
         .navigationBarTitleDisplayMode(.large)
         .toolbar { toolbarMenu }
         .refreshable {
@@ -125,7 +126,10 @@ struct DeckDetailView: View {
             Button("Cancel", role: .cancel) {}
             Button("Save") {
                 let trimmed = renameText.trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty { deck.title = trimmed }
+                if !trimmed.isEmpty, trimmed != deck.title {
+                    deck.title = trimmed
+                    deck.markModifiedByMe()
+                }
             }
         }
         .confirmationDialog("Regenerate all cards?", isPresented: $isConfirmingRegenerate, titleVisibility: .visible) {
@@ -279,6 +283,7 @@ struct DeckDetailView: View {
     private func delete(_ card: Flashcard) {
         deck.cards.removeAll { $0.id == card.id }
         modelContext.delete(card)
+        deck.markModifiedByMe()
         try? modelContext.save()
     }
 }

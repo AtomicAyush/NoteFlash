@@ -91,6 +91,9 @@ nonisolated struct DriveItem: Identifiable, Hashable, Sendable {
     var modifiedTime: Date?
     var modifiedByMeTime: Date?
     var viewedByMeTime: Date?
+    var sharedWithMeTime: Date?
+    /// Bytes the file counts against the owner's storage.
+    var size: Int64?
     var ownedByMe = false
     var ownerName: String?
     var lastModifierName: String?
@@ -139,19 +142,35 @@ nonisolated enum DriveLocation: Hashable, Sendable {
 /// Sort orders offered by Google Drive.
 nonisolated enum DriveSort: String, CaseIterable, Identifiable, Sendable {
     case name
+    case shared
     case modified
     case modifiedByMe
     case opened
+    case storage
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .name: "Name"
+        case .shared: "Date shared"
         case .modified: "Last modified"
         case .modifiedByMe: "Last modified by me"
         case .opened: "Last opened by me"
+        case .storage: "Storage used"
         }
+    }
+
+    /// The sorts Drive offers in each place. "Date shared" only applies to Shared with me.
+    static func options(for location: DriveLocation?) -> [DriveSort] {
+        location == .sharedWithMe
+            ? [.name, .shared, .modified, .modifiedByMe, .opened, .storage]
+            : [.name, .modified, .modifiedByMe, .opened, .storage]
+    }
+
+    /// This sort, or Drive's default where it isn't offered.
+    func available(in location: DriveLocation?) -> DriveSort {
+        Self.options(for: location).contains(self) ? self : .modified
     }
 
     var ascendingByDefault: Bool { self == .name }
@@ -159,6 +178,7 @@ nonisolated enum DriveSort: String, CaseIterable, Identifiable, Sendable {
     func directionLabel(ascending: Bool) -> String {
         switch self {
         case .name: ascending ? "A to Z" : "Z to A"
+        case .storage: ascending ? "Smallest first" : "Largest first"
         default: ascending ? "Oldest first" : "Newest first"
         }
     }
@@ -166,40 +186,52 @@ nonisolated enum DriveSort: String, CaseIterable, Identifiable, Sendable {
     func orderBy(ascending: Bool) -> String {
         let key = switch self {
         case .name: "name_natural"
+        case .shared: "sharedWithMeTime"
         case .modified: "modifiedTime"
         case .modifiedByMe: "modifiedByMeTime"
         case .opened: "viewedByMeTime"
+        case .storage: "quotaBytesUsed"
         }
         return ascending ? key : "\(key) desc"
     }
 
     func date(of item: DriveItem) -> Date? {
         switch self {
-        case .name, .modified: item.modifiedTime
+        case .name, .modified, .storage: item.modifiedTime
+        case .shared: item.sharedWithMeTime
         case .modifiedByMe: item.modifiedByMeTime
         case .opened: item.viewedByMeTime
         }
     }
 
     /// Sorts in memory, e.g. search results (Drive can't order full-text searches).
-    /// Items without the date sort last either way.
+    /// Items without the date (or size) sort last either way.
     func sorted(_ items: [DriveItem], ascending: Bool) -> [DriveItem] {
         items.sorted { a, b in
-            if self == .name {
+            switch self {
+            case .name:
                 let order = a.name.localizedStandardCompare(b.name)
                 return ascending ? order == .orderedAscending : order == .orderedDescending
-            }
-            switch (date(of: a), date(of: b)) {
-            case let (dateA?, dateB?) where dateA != dateB:
-                return ascending ? dateA < dateB : dateA > dateB
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
+            case .storage:
+                return Self.compare(a.size, b.size, ascending: ascending) ?? Self.byName(a, b)
             default:
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                return Self.compare(date(of: a), date(of: b), ascending: ascending) ?? Self.byName(a, b)
             }
         }
+    }
+
+    /// Orders two optional values, with missing ones last; nil when they're equal.
+    private static func compare<T: Comparable>(_ a: T?, _ b: T?, ascending: Bool) -> Bool? {
+        switch (a, b) {
+        case let (a?, b?) where a != b: ascending ? a < b : a > b
+        case (_?, nil): true
+        case (nil, _?): false
+        default: nil
+        }
+    }
+
+    private static func byName(_ a: DriveItem, _ b: DriveItem) -> Bool {
+        a.name.localizedStandardCompare(b.name) == .orderedAscending
     }
 }
 
@@ -266,7 +298,7 @@ nonisolated enum GoogleDriveClient {
         }
     }
 
-    static let fileFields = "id,name,mimeType,modifiedTime,modifiedByMeTime,viewedByMeTime,ownedByMe,"
+    static let fileFields = "id,name,mimeType,modifiedTime,modifiedByMeTime,viewedByMeTime,sharedWithMeTime,quotaBytesUsed,ownedByMe,"
         + "owners(displayName),lastModifyingUser(displayName,me),parents,starred,shared,thumbnailLink"
 
     @concurrent
@@ -434,6 +466,8 @@ nonisolated enum GoogleDriveClient {
         let modifiedTime: String?
         let modifiedByMeTime: String?
         let viewedByMeTime: String?
+        let sharedWithMeTime: String?
+        let quotaBytesUsed: String?
         let ownedByMe: Bool?
         let owners: [Person]?
         let lastModifyingUser: Person?
@@ -450,6 +484,8 @@ nonisolated enum GoogleDriveClient {
                 modifiedTime: GoogleDriveClient.parseDate(modifiedTime),
                 modifiedByMeTime: GoogleDriveClient.parseDate(modifiedByMeTime),
                 viewedByMeTime: GoogleDriveClient.parseDate(viewedByMeTime),
+                sharedWithMeTime: GoogleDriveClient.parseDate(sharedWithMeTime),
+                size: quotaBytesUsed.flatMap { Int64($0) },
                 ownedByMe: ownedByMe ?? false,
                 ownerName: owners?.first?.displayName,
                 lastModifierName: lastModifyingUser?.displayName,

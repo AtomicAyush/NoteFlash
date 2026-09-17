@@ -5,7 +5,9 @@ struct DeckListView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(DocSyncService.self) private var sync
     @Environment(ProcessingCenter.self) private var processing
-    @Query(sort: \Deck.updatedAt, order: .reverse) private var decks: [Deck]
+    @Query private var decks: [Deck]
+    @AppStorage("deckSort") private var sortRaw = DeckSort.modified.rawValue
+    @AppStorage("deckSortAscending") private var ascending = false
 
     @State private var path: [Deck] = []
     @State private var showingNewDeck = false
@@ -22,9 +24,13 @@ struct DeckListView: View {
         }
     }
 
+    private var sort: DeckSort { DeckSort(rawValue: sortRaw) ?? .modified }
+
     private var filteredDecks: [Deck] {
-        guard !searchText.isEmpty else { return decks }
-        return decks.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+        let matching = searchText.isEmpty
+            ? decks
+            : decks.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
+        return sort.sorted(matching, ascending: ascending)
     }
 
     var body: some View {
@@ -60,12 +66,22 @@ struct DeckListView: View {
                     }
                 }
 
-                ForEach(filteredDecks) { deck in
-                    NavigationLink(value: deck) {
-                        DeckRow(deck: deck)
+                if !filteredDecks.isEmpty {
+                    Section {
+                        ForEach(filteredDecks) { deck in
+                            NavigationLink(value: deck) {
+                                DeckRow(deck: deck, sort: sort)
+                            }
+                        }
+                        .onDelete(perform: deleteDecks)
+                    } header: {
+                        SortHeaderButton(
+                            label: sort.label,
+                            ascending: $ascending,
+                            directionLabel: sort.directionLabel(ascending: ascending)
+                        )
                     }
                 }
-                .onDelete(perform: deleteDecks)
             }
             .overlay {
                 if decks.isEmpty && processing.jobs.isEmpty {
@@ -96,7 +112,8 @@ struct DeckListView: View {
                         showingSettings = true
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    sortMenu
                     Button("New Deck", systemImage: "plus") {
                         showingNewDeck = true
                     }
@@ -116,6 +133,27 @@ struct DeckListView: View {
                 }
                 openDeck(deckID)
             }
+        }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Section("Sort By") {
+                Picker("Sort By", selection: $sortRaw) {
+                    ForEach(DeckSort.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+            SortOrderPicker(ascending: $ascending, ascendingByDefault: sort.ascendingByDefault) {
+                sort.directionLabel(ascending: $0)
+            }
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
+        }
+        .onChange(of: sortRaw) {
+            ascending = sort.ascendingByDefault
         }
     }
 
@@ -140,6 +178,7 @@ struct DeckListView: View {
 
 private struct DeckRow: View {
     let deck: Deck
+    let sort: DeckSort
 
     var body: some View {
         HStack(spacing: 14) {
@@ -165,6 +204,10 @@ private struct DeckRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                Text(sort.activity(for: deck))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 0)
@@ -179,5 +222,53 @@ private struct DeckRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+extension DeckSort {
+    func sorted(_ decks: [Deck], ascending: Bool) -> [Deck] {
+        decks.sorted { a, b in
+            if self == .name {
+                let order = a.title.localizedStandardCompare(b.title)
+                if order != .orderedSame {
+                    return ascending ? order == .orderedAscending : order == .orderedDescending
+                }
+                return a.createdAt > b.createdAt
+            }
+            // Decks without the date sort last either way, as in Drive.
+            switch (date(of: a), date(of: b)) {
+            case let (dateA?, dateB?) where dateA != dateB:
+                return ascending ? dateA < dateB : dateA > dateB
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return a.title.localizedStandardCompare(b.title) == .orderedAscending
+            }
+        }
+    }
+
+    func date(of deck: Deck) -> Date? {
+        switch self {
+        case .name, .modified: deck.updatedAt
+        case .modifiedByMe: deck.modifiedByMeAt
+        case .opened: deck.lastOpenedAt
+        case .created: deck.createdAt
+        }
+    }
+
+    /// The date line that matches the sort, worded like Drive's.
+    func activity(for deck: Deck) -> String {
+        switch self {
+        case .name, .modified:
+            "Modified \(DriveText.short(deck.updatedAt))"
+        case .modifiedByMe:
+            deck.modifiedByMeAt.map { "You modified \(DriveText.short($0))" } ?? "You haven't edited this"
+        case .opened:
+            deck.lastOpenedAt.map { "You opened \(DriveText.short($0))" } ?? "You haven't opened this"
+        case .created:
+            "Created \(DriveText.short(deck.createdAt))"
+        }
     }
 }

@@ -16,6 +16,7 @@ struct DriveListingView: View {
     @AppStorage("driveSort") private var sortRaw = DriveSort.modified.rawValue
     @AppStorage("driveSortAscending") private var ascending = false
     @AppStorage("driveLayout") private var layoutRaw = DriveLayout.list.rawValue
+    @AppStorage("driveFoldersOnTop") private var foldersOnTopSetting = true
     @State private var model: DriveListingModel
 
     init(content: DriveListingModel.Content, title: String?, context: DrivePickerContext) {
@@ -25,12 +26,18 @@ struct DriveListingView: View {
         _model = State(initialValue: DriveListingModel(content: content))
     }
 
-    private var sort: DriveSort { DriveSort(rawValue: sortRaw) ?? .modified }
     private var layout: DriveLayout { DriveLayout(rawValue: layoutRaw) ?? .list }
     private var isRecent: Bool { content == .location(.recent) }
-    /// Recent is always ordered by when you opened each doc.
+    private var location: DriveLocation? {
+        if case .location(let location) = content { location } else { nil }
+    }
+    /// The chosen sort, where Drive offers it here.
+    private var sort: DriveSort { (DriveSort(rawValue: sortRaw) ?? .modified).available(in: location) }
+    /// Recent is always ordered by when you opened each file.
     private var effectiveSort: DriveSort { isRecent ? .opened : sort }
     private var effectiveAscending: Bool { isRecent ? false : ascending }
+    /// Grids always show folders first, as in Drive.
+    private var foldersOnTop: Bool { foldersOnTopSetting || layout == .grid }
 
     /// Where a doc lives is worth showing when the list isn't a single folder.
     private var showsLocation: Bool {
@@ -48,12 +55,17 @@ struct DriveListingView: View {
                         sortRaw: $sortRaw,
                         ascending: $ascending,
                         layoutRaw: $layoutRaw,
-                        sortLocked: isRecent
+                        foldersOnTop: $foldersOnTopSetting,
+                        sortOptions: isRecent ? [] : DriveSort.options(for: location),
+                        currentSort: sort
                     )
                 }
             }
-            .task(id: "\(sortRaw)-\(ascending)-\(googleAuth.hasDriveAccess)") {
-                await model.load(sort: effectiveSort, ascending: effectiveAscending, context: context, auth: googleAuth)
+            .task(id: "\(effectiveSort)-\(effectiveAscending)-\(foldersOnTop)-\(googleAuth.hasDriveAccess)") {
+                await model.load(
+                    sort: effectiveSort, ascending: effectiveAscending, foldersOnTop: foldersOnTop,
+                    context: context, auth: googleAuth
+                )
             }
     }
 
@@ -119,7 +131,7 @@ struct DriveListingView: View {
                 Section("Folders") {
                     ForEach(model.folders) { folder in
                         NavigationLink(value: DriveRoute.folder(folder)) {
-                            DriveFolderRow(item: folder, showsLocation: showsLocation, context: context)
+                            DriveFolderRow(item: folder, sort: nil, showsLocation: showsLocation, context: context)
                         }
                         .accessibilityIdentifier("drive-folder")
                     }
@@ -128,16 +140,25 @@ struct DriveListingView: View {
             if !model.docs.isEmpty {
                 Section {
                     ForEach(model.docs) { doc in
-                        NavigationLink(value: DriveRoute.preview(doc)) {
-                            DriveDocRow(item: doc, sort: effectiveSort, showsLocation: showsLocation, context: context)
+                        if doc.isFolder {
+                            // Folders mixed in with files.
+                            NavigationLink(value: DriveRoute.folder(doc)) {
+                                DriveFolderRow(item: doc, sort: effectiveSort, showsLocation: showsLocation, context: context)
+                            }
+                            .accessibilityIdentifier("drive-folder")
+                            .onAppear { loadMoreIfLast(doc) }
+                        } else {
+                            NavigationLink(value: DriveRoute.preview(doc)) {
+                                DriveDocRow(item: doc, sort: effectiveSort, showsLocation: showsLocation, context: context)
+                            }
+                            .accessibilityIdentifier("drive-doc")
+                            .swipeActions(edge: .leading) {
+                                Button("Use", systemImage: "checkmark") { context.select(doc) }
+                                    .tint(.accentColor)
+                            }
+                            .contextMenu { docMenu(doc) }
+                            .onAppear { loadMoreIfLast(doc) }
                         }
-                        .accessibilityIdentifier("drive-doc")
-                        .swipeActions(edge: .leading) {
-                            Button("Use", systemImage: "checkmark") { context.select(doc) }
-                                .tint(.accentColor)
-                        }
-                        .contextMenu { docMenu(doc) }
-                        .onAppear { loadMoreIfLast(doc) }
                     }
                     if model.nextPageToken != nil {
                         ProgressView().frame(maxWidth: .infinity)
@@ -214,18 +235,7 @@ struct DriveListingView: View {
         if isRecent {
             Text("Last opened by me")
         } else {
-            Button {
-                ascending.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    Text(sort.label)
-                    Image(systemName: ascending ? "arrow.up" : "arrow.down")
-                        .font(.caption.weight(.bold))
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Sorted by \(sort.label), \(sort.directionLabel(ascending: ascending))")
-            .accessibilityHint("Double-tap to reverse the order")
+            SortHeaderButton(label: sort.label, ascending: $ascending, directionLabel: sort.directionLabel(ascending: ascending))
         }
     }
 
@@ -248,7 +258,10 @@ struct DriveListingView: View {
     }
 
     private func reload() async {
-        await model.load(sort: effectiveSort, ascending: effectiveAscending, context: context, auth: googleAuth, force: true)
+        await model.load(
+            sort: effectiveSort, ascending: effectiveAscending, foldersOnTop: foldersOnTop,
+            context: context, auth: googleAuth, force: true
+        )
     }
 }
 
@@ -270,6 +283,7 @@ final class DriveListingModel {
 
     private var sort: DriveSort = .modified
     private var ascending = false
+    private var foldersOnTop = true
     private var generation = 0
 
     init(content: Content) {
@@ -278,10 +292,11 @@ final class DriveListingModel {
 
     var isEmpty: Bool { folders.isEmpty && docs.isEmpty }
 
-    func load(sort: DriveSort, ascending: Bool, context: DrivePickerContext, auth: GoogleAuth, force: Bool = false) async {
-        let sortChanged = sort != self.sort || ascending != self.ascending
+    func load(sort: DriveSort, ascending: Bool, foldersOnTop: Bool, context: DrivePickerContext, auth: GoogleAuth, force: Bool = false) async {
+        let sortChanged = sort != self.sort || ascending != self.ascending || foldersOnTop != self.foldersOnTop
         self.sort = sort
         self.ascending = ascending
+        self.foldersOnTop = foldersOnTop
 
         // Search results come back unordered, so re-sorting them needs no new request.
         if case .search = content, hasLoaded, !force, errorMessage == nil {
@@ -297,7 +312,9 @@ final class DriveListingModel {
         do {
             switch content {
             case .location(let location):
-                let listing = try await context.source.listing(in: location, sort: sort, ascending: ascending, auth: auth)
+                let listing = try await context.source.listing(
+                    in: location, sort: sort, ascending: ascending, foldersOnTop: foldersOnTop, auth: auth
+                )
                 guard current == generation else { return }
                 folders = listing.folders
                 docs = listing.docs.items
@@ -326,7 +343,8 @@ final class DriveListingModel {
             switch content {
             case .location(let location):
                 let page = try await context.source.moreDocs(
-                    in: location, sort: sort, ascending: ascending, pageToken: pageToken, auth: auth
+                    in: location, sort: sort, ascending: ascending, foldersOnTop: foldersOnTop,
+                    pageToken: pageToken, auth: auth
                 )
                 guard current == generation else { return }
                 let known = Set(docs.map(\.id))
@@ -347,15 +365,23 @@ final class DriveListingModel {
     private func apply(searchPage page: DrivePage, replacing: Bool) {
         let known = replacing ? Set<String>() : Set((folders + docs).map(\.id))
         let fresh = page.items.filter { !known.contains($0.id) }
-        folders = (replacing ? [] : folders) + fresh.filter(\.isFolder)
-        docs = (replacing ? [] : docs) + fresh.filter { !$0.isFolder }
+        searchResults = (replacing ? [] : searchResults) + fresh
         nextPageToken = page.nextPageToken
         resort()
     }
 
+    /// Everything a search found, before splitting out folders.
+    private var searchResults: [DriveItem] = []
+
     private func resort() {
-        folders = sort.sorted(folders, ascending: ascending)
-        docs = sort.sorted(docs, ascending: ascending)
+        let sorted = sort.sorted(searchResults, ascending: ascending)
+        if foldersOnTop {
+            folders = sorted.filter(\.isFolder)
+            docs = sorted.filter { !$0.isFolder }
+        } else {
+            folders = []
+            docs = sorted
+        }
     }
 
     private func handle(_ error: Error) {

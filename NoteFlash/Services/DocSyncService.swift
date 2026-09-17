@@ -171,6 +171,7 @@ final class DocSyncService {
     func updateNotes(of deck: Deck, to newText: String, reporter: ProcessingReporter = .silent) async throws -> String {
         try await exclusively(deck) {
             let summary = try await revise(deck, toMatch: newText, reporter: reporter)
+            deck.markModifiedByMe()
             save()
             return summary
         }
@@ -222,7 +223,7 @@ final class DocSyncService {
                 deck.lastCheckedAt = .now
                 deck.lastSyncError = nil
             }
-            deck.updatedAt = .now
+            deck.markModifiedByMe()
             deck.lastSyncSummary = "Regenerated \(generated.cards.count) cards"
             save()
         }

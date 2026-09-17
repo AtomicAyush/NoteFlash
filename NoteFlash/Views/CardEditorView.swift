@@ -46,6 +46,7 @@ struct CardEditorView: View {
                         Button("Delete Card", role: .destructive) {
                             deck.cards.removeAll { $0.id == card.id }
                             modelContext.delete(card)
+                            deck.markModifiedByMe()
                             try? modelContext.save()
                             dismiss()
                         }
@@ -67,6 +68,7 @@ struct CardEditorView: View {
     }
 
     private func save() {
+        var edited = true
         if let card {
             if card.front != trimmedFront || card.back != trimmedBack {
                 card.front = trimmedFront
@@ -74,6 +76,9 @@ struct CardEditorView: View {
                 card.isUserEdited = true
                 card.updatedAt = .now
                 card.setBadge(nil)
+            } else {
+                // Starring alone doesn't count as editing the deck.
+                edited = false
             }
             card.isStarred = isStarred
         } else {
@@ -82,7 +87,7 @@ struct CardEditorView: View {
             modelContext.insert(newCard)
             deck.cards.append(newCard)
         }
-        deck.updatedAt = .now
+        if edited { deck.markModifiedByMe() }
         try? modelContext.save()
         dismiss()
     }

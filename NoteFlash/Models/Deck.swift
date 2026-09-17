@@ -6,7 +6,11 @@ final class Deck {
     var id: UUID = UUID()
     var title: String = ""
     var createdAt: Date = Date.now
+    /// Last change of any kind, including updates from a linked file.
     var updatedAt: Date = Date.now
+    /// Last change the user made (editing cards or notes, renaming, regenerating).
+    var modifiedByMeAt: Date?
+    var lastOpenedAt: Date?
 
     // Where the notes came from.
     var sourceKindRaw: String = SourceKind.text.rawValue
@@ -41,6 +45,13 @@ final class Deck {
         self.sourceName = sourceName
         self.sourceText = sourceText
         self.densityRaw = density.rawValue
+        self.modifiedByMeAt = .now
+    }
+
+    /// Records a change the user made.
+    func markModifiedByMe() {
+        updatedAt = .now
+        modifiedByMeAt = .now
     }
 
     var sourceKind: SourceKind {

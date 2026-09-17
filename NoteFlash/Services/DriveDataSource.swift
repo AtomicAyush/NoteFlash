@@ -5,8 +5,9 @@ import UIKit
 protocol DriveDataSource {
     func requiresSignIn(_ auth: GoogleAuth) -> Bool
     func requiresListPermission(_ auth: GoogleAuth) -> Bool
-    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, auth: GoogleAuth) async throws -> DriveListing
-    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage
+    /// Folders and the first page of files. With `foldersOnTop` off, folders come mixed into the files.
+    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, auth: GoogleAuth) async throws -> DriveListing
+    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage
     func search(_ term: String, pageToken: String?, auth: GoogleAuth) async throws -> DrivePage
     func folderName(id: String, auth: GoogleAuth) async throws -> String
     func content(of item: DriveItem, auth: GoogleAuth) async throws -> DriveFileContent
@@ -29,13 +30,14 @@ struct LiveDriveDataSource: DriveDataSource {
 
     func requiresListPermission(_ auth: GoogleAuth) -> Bool { !auth.hasDriveAccess }
 
-    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, auth: GoogleAuth) async throws -> DriveListing {
+    func listing(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, auth: GoogleAuth) async throws -> DriveListing {
         let orderBy = Self.orderBy(for: location, sort: sort, ascending: ascending)
+        let mixed = !foldersOnTop && location != .recent
         return try await authorized(auth) { token in
-            async let folders = Self.folders(in: location, orderBy: orderBy, token: token)
+            async let folders = mixed ? [] : Self.folders(in: location, orderBy: orderBy, token: token)
             async let docs = GoogleDriveClient.listFiles(
                 accessToken: token,
-                query: DriveQuery.items(in: location, mimeTypes: DriveMimeType.readable),
+                query: Self.fileQuery(in: location, mixed: mixed),
                 orderBy: orderBy,
                 pageSize: 50,
                 pageToken: nil
@@ -44,12 +46,13 @@ struct LiveDriveDataSource: DriveDataSource {
         }
     }
 
-    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage {
+    func moreDocs(in location: DriveLocation, sort: DriveSort, ascending: Bool, foldersOnTop: Bool, pageToken: String, auth: GoogleAuth) async throws -> DrivePage {
         let orderBy = Self.orderBy(for: location, sort: sort, ascending: ascending)
+        let mixed = !foldersOnTop && location != .recent
         return try await authorized(auth) { token in
             try await GoogleDriveClient.listFiles(
                 accessToken: token,
-                query: DriveQuery.items(in: location, mimeTypes: DriveMimeType.readable),
+                query: Self.fileQuery(in: location, mixed: mixed),
                 orderBy: orderBy,
                 pageSize: 50,
                 pageToken: pageToken
@@ -91,7 +94,14 @@ struct LiveDriveDataSource: DriveDataSource {
 
     private static func orderBy(for location: DriveLocation, sort: DriveSort, ascending: Bool) -> String {
         // Recent is always most recently opened first, as in Drive.
-        location == .recent ? DriveSort.opened.orderBy(ascending: false) : sort.orderBy(ascending: ascending)
+        guard location != .recent else { return DriveSort.opened.orderBy(ascending: false) }
+        let primary = sort.available(in: location).orderBy(ascending: ascending)
+        // Break ties (like equal sizes) by name, as Drive does.
+        return sort == .name ? primary : "\(primary),name_natural"
+    }
+
+    private static func fileQuery(in location: DriveLocation, mixed: Bool) -> String {
+        DriveQuery.items(in: location, mimeTypes: DriveMimeType.readable + (mixed ? [DriveMimeType.folder] : []))
     }
 
     nonisolated private static func folders(in location: DriveLocation, orderBy: String, token: String) async throws -> [DriveItem] {
