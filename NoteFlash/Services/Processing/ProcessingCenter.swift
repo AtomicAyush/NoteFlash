@@ -173,8 +173,10 @@ final class ProcessingCenter {
         launch(ProcessingJob(kind: job.kind, title: job.title))
     }
 
-    /// Resumes jobs that paused while the app was in the background.
+    /// Resumes jobs that paused while the app was in the background, and starts decks for
+    /// notes shared from other apps.
     func appDidBecomeActive() {
+        SharedNotesImporter.importPending(into: self)
         for job in jobs where job.state == .paused {
             log.record("Resuming: \(job.title)")
             retry(job)
@@ -493,13 +495,49 @@ private extension String {
     }
 }
 
-/// Deck navigation requested from outside the view hierarchy (notification taps).
+/// Navigation requested from outside the view hierarchy: notification taps, and files other
+/// apps open in NoteFlash.
 @Observable
 final class AppRouter {
     static let shared = AppRouter()
     nonisolated static let deckIDKey = "deckID"
 
     var deckToOpen: UUID?
+    var incomingNotes: IncomingNotes?
+
+    /// A file sent with "Open in NoteFlash" (or "Copy to NoteFlash") from the share sheet.
+    func receive(_ url: URL) {
+        guard url.isFileURL else { return }
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else {
+            DiagnosticsLog.shared.record("Couldn't read opened file: \(url.lastPathComponent)")
+            return
+        }
+        // Copies that iOS placed in Documents/Inbox are ours to delete.
+        if url.path(percentEncoded: false).contains("/Documents/Inbox/") {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let name = url.lastPathComponent
+        let stem = url.deletingPathExtension().lastPathComponent
+        if ["txt", "text", "md", "markdown"].contains(url.pathExtension.lowercased()),
+           let text = String(data: data, encoding: .utf8) {
+            incomingNotes = IncomingNotes(content: .text(title: stem, notes: text))
+        } else {
+            incomingNotes = IncomingNotes(content: .file(name: name, data: data))
+        }
+    }
+}
+
+/// Notes another app handed to NoteFlash, shown in New Deck for the user to confirm.
+struct IncomingNotes: Identifiable {
+    enum Content {
+        case file(name: String, data: Data)
+        case text(title: String, notes: String)
+    }
+
+    let id = UUID()
+    let content: Content
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {

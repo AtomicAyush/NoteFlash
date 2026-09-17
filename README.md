@@ -6,10 +6,16 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
 
 - **Three ways to add notes:**
   - **Text:** type or paste notes.
-  - **File:** import a PDF (scanned pages go through on-device text recognition) or a PowerPoint (.pptx) file. Slides contribute their titles, text, tables, and speaker notes.
+  - **File:** import a PDF, a PowerPoint (.pptx) file, or a photo of your notes. Scanned pages and handwriting go through on-device text recognition. Slides contribute their titles, text, tables, and speaker notes.
   - **Google Drive:** use a Google Doc, Google Slides presentation, PDF, or PowerPoint file from Drive, or paste a link. Browse your Drive like the Drive app: My Drive folders, Shared, Starred, Recent, and search by name or text. Preview the text before using a file.
     - **Sorting:** Name, Last modified, Last modified by me, Last opened by me, Storage used, and (in Shared) Date shared, in either direction.
     - **View:** list or grid, with folders on top or mixed with files (list view).
+- **Share from other apps:** in GoodNotes, Notability, Notes, Files, Photos, and most other apps, tap **Share** and choose **NoteFlash**. It works for text, PDFs, images, PowerPoint files, and Google Docs, Slides, or Drive links.
+  - **Confirm:** the share sheet shows what was shared, with a title and card detail setting. Tap **Make Cards**.
+  - **Make the cards:** NoteFlash makes the cards as soon as it opens. A notification lets you open it right away.
+  - **GoodNotes:** use **Share → Export** and choose **PDF** or **Image**; `.goodnotes` notebooks can't be read directly.
+  - **Handwriting:** in PDFs from note-taking apps, handwriting is read along with typed text. Several images become one deck with a page per image.
+  - **Open in NoteFlash:** apps that offer "Open in…" can also send PDFs, images, PowerPoint, and text files straight to the New Deck screen.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
 - **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
   - Cards you write or edit by hand are locked and never overwritten.
@@ -62,7 +68,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 | Line diffing and section splitting | `TextDiff.swift`, `NoteChunker.swift` |
 | Google sign-in (OAuth + PKCE, no SDK), Docs reading, Drive browsing | `GoogleAuth.swift`, `GoogleDocsClient.swift`, `GoogleDriveClient.swift`, `DriveDataSource.swift` |
 | Reading Drive files (Docs, Slides, PDFs, PowerPoint) | `DriveFileReader.swift` |
-| PDF and PowerPoint text | `PDFTextExtractor.swift`, `PowerPointTextExtractor.swift`, `ZipArchive.swift` |
+| PDF, PowerPoint, and image text | `PDFTextExtractor.swift`, `RecognizedText.swift`, `ImageNotes.swift`, `PowerPointTextExtractor.swift`, `ZipArchive.swift` |
+| Share extension and its inbox | `NoteFlashShare/`, `Shared/SharedInbox.swift`, `SharedNotesImporter.swift` |
 | Drive picker (folders, sort, grid, preview) | `NoteFlash/Views/DocPicker` |
 | Sync, note edits, regeneration | `DocSyncService.swift` |
 | Screens and study modes | `NoteFlash/Views` |
@@ -81,6 +88,13 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
   - **Slides:** exported as .pptx, or as plain text for decks over Drive's 10 MB export limit.
   - **PDFs and PowerPoint files:** downloaded.
   - **Shared by link:** without sign-in, or when the signed-in account can't open a file, public export and download links are used. Their type is detected from the downloaded bytes.
+
+**Sharing from other apps.**
+- **Handoff:** a share extension can't open its app or run long jobs, so `NoteFlashShare` copies what was shared into an App Group folder (`group.com.ayushkansal.NoteFlash`). The item's manifest is written last, so the app never reads a half-written item.
+- **Notification:** the extension posts a notification that opens NoteFlash.
+- **Import:** each time the app becomes active, `SharedNotesImporter` starts a normal background job for each item and deletes it.
+- **Images:** turned into a PDF, one page per image, so they can be viewed, read with text recognition, and sent to Claude like any PDF.
+- **Handwriting:** PDF pages with little selectable text are read with Vision. For PDFs from note-taking apps, or whose first pages show much more text than they contain, every page is also read with Vision. Lines not already in the typed text are added.
 
 **Keeping cards in sync.**
 - **Detecting changes:** signed in, the app first compares the file's Drive version and skips unchanged files. Otherwise it compares a hash of the download. It then fingerprints the notes and diffs them line by line.
@@ -105,6 +119,8 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 ## Development notes
 
 - Launch with the `-uiTesting` argument (Debug builds only) to use an in-memory store with a sample deck and an offline sample Drive (Docs, Slides, a PDF, and a PowerPoint file) for the picker.
+- The share extension and the app must share the App Group `group.com.ayushkansal.NoteFlash` (see the `.entitlements` files). Automatic signing registers it.
+- To test importing shared notes without the share sheet, add a folder with an `item.json` (see `SharedInbox.Item`) to the app group's `SharedInbox` directory. `xcrun simctl get_app_container booted com.ayushkansal.NoteFlash groups` prints its path.
 - The on-device model's behavior varies from run to run, so check prompt changes against several kinds of notes.
 - Launch with `-appleModelSelfTest` (Debug builds) to run the Apple Intelligence check at startup. The results go to `Documents/NoteFlash-processing-log.txt` in the app's data container. On a macOS 26 Mac, the iOS 27 Simulator can't load the on-device model, so every request fails with a model manager error.
 - `-uiTesting` also swaps in a slow sample engine, so processing progress can be checked in the Simulator. The Simulator can't run continued-processing tasks or Apple's on-device model, so try the Live Activity on a real iPhone.

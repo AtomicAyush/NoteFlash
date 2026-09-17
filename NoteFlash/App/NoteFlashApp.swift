@@ -42,6 +42,9 @@ struct NoteFlashApp: App {
                 .environment(googleAuth)
                 .environment(syncService)
                 .environment(processing)
+                .onOpenURL { url in
+                    AppRouter.shared.receive(url)
+                }
                 #if DEBUG
                 .task {
                     if AppleIntelligenceCheck.isRequestedAtLaunch { await AppleIntelligenceCheck.run() }

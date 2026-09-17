@@ -14,6 +14,8 @@ struct DeckListView: View {
     @State private var showingSettings = false
     @State private var searchText = ""
     @State private var hasAPIKey = KeychainStore.string(for: .anthropicAPIKey) != nil
+    @State private var router = AppRouter.shared
+    @State private var incomingNotes: IncomingNotes?
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
 
     /// Why the selected AI model can't write cards yet, if anything.
@@ -35,69 +37,85 @@ struct DeckListView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            List {
-                if let setupProblem {
-                    Section {
-                        Button {
-                            showingSettings = true
-                        } label: {
-                            Label {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(engine == .apple ? "Apple Intelligence isn't ready" : "Add your Claude API key")
-                                        .font(.headline)
-                                    Text(setupProblem)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: engine == .apple ? "sparkles" : "key.fill")
-                            }
-                        }
-                    }
-                }
+            presentations(on: navigable(deckList))
+        }
+    }
 
-                if !processing.jobs.isEmpty {
-                    Section {
-                        ForEach(processing.jobs) { job in
-                            ProcessingJobRow(job: job, onOpen: openDeck)
-                        }
-                    } header: {
-                        Text("Processing")
-                    }
-                }
+    private var deckList: some View {
+        List {
+            if let setupProblem {
+                setupSection(setupProblem)
+            }
 
-                if !filteredDecks.isEmpty {
-                    Section {
-                        ForEach(filteredDecks) { deck in
-                            NavigationLink(value: deck) {
-                                DeckRow(deck: deck, sort: sort)
-                            }
-                        }
-                        .onDelete(perform: deleteDecks)
-                    } header: {
-                        SortHeaderButton(
-                            label: sort.label,
-                            ascending: $ascending,
-                            directionLabel: sort.directionLabel(ascending: ascending)
-                        )
+            if !processing.jobs.isEmpty {
+                Section {
+                    ForEach(processing.jobs) { job in
+                        ProcessingJobRow(job: job, onOpen: openDeck)
                     }
+                } header: {
+                    Text("Processing")
                 }
             }
-            .overlay {
-                if decks.isEmpty && processing.jobs.isEmpty {
-                    ContentUnavailableView {
-                        Label("No Decks Yet", systemImage: "rectangle.stack.badge.plus")
-                    } description: {
-                        Text("Paste notes, import a PDF, or link a Google Doc, and NoteFlash will turn it into flashcards.")
-                    } actions: {
-                        Button("Create a Deck") { showingNewDeck = true }
-                            .buttonStyle(.borderedProminent)
+
+            if !filteredDecks.isEmpty {
+                Section {
+                    ForEach(filteredDecks) { deck in
+                        NavigationLink(value: deck) {
+                            DeckRow(deck: deck, sort: sort)
+                        }
                     }
-                    .padding(.top, setupProblem == nil ? 0 : 160)
-                } else if filteredDecks.isEmpty {
-                    ContentUnavailableView.search(text: searchText)
+                    .onDelete(perform: deleteDecks)
+                } header: {
+                    SortHeaderButton(
+                        label: sort.label,
+                        ascending: $ascending,
+                        directionLabel: sort.directionLabel(ascending: ascending)
+                    )
                 }
             }
+        }
+        .overlay { emptyState }
+    }
+
+    private func setupSection(_ problem: String) -> some View {
+        Section {
+            Button {
+                showingSettings = true
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(engine == .apple ? "Apple Intelligence isn't ready" : "Add your Claude API key")
+                            .font(.headline)
+                        Text(problem)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: engine == .apple ? "sparkles" : "key.fill")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var emptyState: some View {
+        if decks.isEmpty && processing.jobs.isEmpty {
+            ContentUnavailableView {
+                Label("No Decks Yet", systemImage: "rectangle.stack.badge.plus")
+            } description: {
+                Text("Paste notes, import a PDF or slides, link a Google Drive file, or share notes from apps like GoodNotes, and NoteFlash will turn them into flashcards.")
+            } actions: {
+                Button("Create a Deck") { showingNewDeck = true }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(.top, setupProblem == nil ? 0 : 160)
+        } else if filteredDecks.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        }
+    }
+
+    private func navigable(_ content: some View) -> some View {
+        content
             .navigationTitle("NoteFlash")
             .navigationDestination(for: Deck.self) { deck in
                 DeckDetailView(deck: deck)
@@ -119,21 +137,33 @@ struct DeckListView: View {
                     }
                 }
             }
+    }
+
+    /// Sheets, plus requests from notifications and other apps.
+    private func presentations(on content: some View) -> some View {
+        content
             .sheet(isPresented: $showingNewDeck) {
                 NewDeckView()
+            }
+            .sheet(item: $incomingNotes) { incoming in
+                NewDeckView(incoming: incoming)
             }
             .sheet(isPresented: $showingSettings, onDismiss: refreshKeyState) {
                 SettingsView()
             }
-            .onChange(of: AppRouter.shared.deckToOpen, initial: true) { _, deckID in
+            .onChange(of: router.incomingNotes?.id, initial: true) {
+                guard let incoming = router.incomingNotes else { return }
+                router.incomingNotes = nil
+                Task { await present(incoming) }
+            }
+            .onChange(of: router.deckToOpen, initial: true) { _, deckID in
                 guard let deckID else { return }
-                AppRouter.shared.deckToOpen = nil
+                router.deckToOpen = nil
                 if let job = processing.jobs.first(where: { $0.deckID == deckID && !$0.isRunning }) {
                     processing.dismiss(job)
                 }
                 openDeck(deckID)
             }
-        }
     }
 
     private var sortMenu: some View {
@@ -155,6 +185,18 @@ struct DeckListView: View {
         .onChange(of: sortRaw) {
             ascending = sort.ascendingByDefault
         }
+    }
+
+    /// Shows New Deck for a file another app opened in NoteFlash, closing any open sheet first.
+    private func present(_ incoming: IncomingNotes) async {
+        if showingNewDeck || showingSettings || incomingNotes != nil {
+            showingNewDeck = false
+            showingSettings = false
+            incomingNotes = nil
+            try? await Task.sleep(for: .milliseconds(600))
+        }
+        path = []
+        incomingNotes = incoming
     }
 
     private func openDeck(_ id: UUID) {

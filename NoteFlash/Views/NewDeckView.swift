@@ -28,12 +28,18 @@ struct NewDeckView: View {
         }
     }
 
-    /// A PDF or PowerPoint file picked from Files.
+    /// A PDF, PowerPoint, or image file picked from Files or opened from another app.
     nonisolated private struct PickedFile: Sendable {
+        enum Kind: Sendable {
+            case pdf
+            case presentation
+            case image
+        }
+
         let name: String
         let data: Data
-        let isPresentation: Bool
-        /// "12 pages" or "8 slides"
+        let kind: Kind
+        /// "12 pages", "8 slides", or "Image"
         let summary: String
         /// Approximate notes length, for the time estimate.
         let characters: Int
@@ -59,6 +65,21 @@ struct NewDeckView: View {
     @State private var autoSync = true
     @State private var density: CardDensity = .balanced
     @State private var errorMessage: String?
+    private let incoming: IncomingNotes?
+
+    /// `incoming` fills in notes another app opened in NoteFlash.
+    init(incoming: IncomingNotes? = nil) {
+        self.incoming = incoming
+        switch incoming?.content {
+        case .text(let title, let notes):
+            _title = State(initialValue: title)
+            _notes = State(initialValue: notes)
+        case .file:
+            _source = State(initialValue: .file)
+        case nil:
+            break
+        }
+    }
 
     private var canGenerate: Bool {
         switch source {
@@ -133,9 +154,14 @@ struct NewDeckView: View {
             }
             .fileImporter(
                 isPresented: $isImportingFile,
-                allowedContentTypes: [.pdf, Self.powerPointType],
+                allowedContentTypes: [.pdf, Self.powerPointType, .image],
                 onCompletion: importFile
             )
+            .task {
+                if case .file(let name, let data) = incoming?.content, pickedFile == nil {
+                    await pick(data, name: name)
+                }
+            }
             .sheet(isPresented: $isPickingFile) {
                 GoogleDocPickerView(linkedDocIDs: Set(decks.compactMap(\.googleDocID))) { item in
                     selectedFile = item
@@ -177,7 +203,7 @@ struct NewDeckView: View {
                 LabeledContent {
                     Text(pickedFile.summary)
                 } label: {
-                    Label(pickedFile.name, systemImage: pickedFile.isPresentation ? "rectangle.on.rectangle.fill" : "doc.richtext.fill")
+                    Label(pickedFile.name, systemImage: Self.systemImage(for: pickedFile.kind))
                         .lineLimit(2)
                 }
                 Button("Choose a Different File") { isImportingFile = true }
@@ -191,24 +217,13 @@ struct NewDeckView: View {
                 Button {
                     isImportingFile = true
                 } label: {
-                    Label("Choose PDF or PowerPoint…", systemImage: "doc.badge.plus")
+                    Label("Choose PDF, PowerPoint, or Image…", systemImage: "doc.badge.plus")
                 }
             }
         } header: {
-            Text("PDF or PowerPoint")
+            Text("PDF, PowerPoint, or Image")
         } footer: {
-            if pickedFile?.isPresentation == true {
-                Text("Slide titles, text, tables, and speaker notes become your notes. Pictures and charts aren't read.")
-            } else if pickedFile != nil {
-                switch engine {
-                case .apple:
-                    Text("Text is read from the PDF on this iPhone. Scanned pages go through on-device text recognition.")
-                case .claude:
-                    Text("Claude reads the whole PDF, including scanned pages, tables, and diagrams.")
-                }
-            } else {
-                Text("Choose a PDF or a PowerPoint (.pptx) file from Files, iCloud Drive, or another storage app. For files in Google Drive, use the Google Drive tab so the deck stays in sync.")
-            }
+            fileFooter
         }
     }
 
@@ -319,19 +334,42 @@ struct NewDeckView: View {
                 return
             }
             let name = url.lastPathComponent
-            errorMessage = nil
-            pickedFile = nil
-            isReadingFile = true
-            Task {
-                defer { isReadingFile = false }
-                do {
-                    pickedFile = try await Self.inspect(data, name: name)
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            }
+            Task { await pick(data, name: name) }
         case .failure(let error):
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func pick(_ data: Data, name: String) async {
+        errorMessage = nil
+        pickedFile = nil
+        isReadingFile = true
+        defer { isReadingFile = false }
+        do {
+            pickedFile = try await Self.inspect(data, name: name)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private var fileFooter: Text {
+        switch pickedFile?.kind {
+        case .presentation:
+            Text("Slide titles, text, tables, and speaker notes become your notes. Pictures and charts aren't read.")
+        case .pdf, .image:
+            engine == .claude
+                ? Text("Claude reads the whole page, including handwriting, tables, and diagrams.")
+                : Text("Text is read on this iPhone. Handwriting and scanned pages go through on-device text recognition.")
+        case nil:
+            Text("Choose a PDF, a PowerPoint (.pptx) file, or a photo of your notes. From GoodNotes and similar apps, export as PDF and tap NoteFlash in the share sheet. For files in Google Drive, use the Google Drive tab so the deck stays in sync.")
+        }
+    }
+
+    private static func systemImage(for kind: PickedFile.Kind) -> String {
+        switch kind {
+        case .pdf: "doc.richtext.fill"
+        case .presentation: "rectangle.on.rectangle.fill"
+        case .image: "photo.fill"
         }
     }
 
@@ -344,14 +382,20 @@ struct NewDeckView: View {
                 throw DriveFileReader.ReadError.empty
             }
             let summary = slides.slideCount == 1 ? "1 slide" : "\(slides.slideCount) slides"
-            return PickedFile(name: name, data: data, isPresentation: true, summary: summary, characters: slides.text.count)
+            return PickedFile(name: name, data: data, kind: .presentation, summary: summary, characters: slides.text.count)
+        }
+        if ImageNotes.isImage(data) {
+            return PickedFile(
+                name: name, data: data, kind: .image, summary: "Image",
+                characters: ProcessingEstimator.estimatedCharacters(pdfPages: 1)
+            )
         }
         guard let pages = PDFTextExtractor.pageCount(of: data) else {
             throw DeckCreator.CreationError.unsupportedFile
         }
         let summary = pages == 1 ? "1 page" : "\(pages) pages"
         return PickedFile(
-            name: name, data: data, isPresentation: false, summary: summary,
+            name: name, data: data, kind: .pdf, summary: summary,
             characters: ProcessingEstimator.estimatedCharacters(pdfPages: pages)
         )
     }

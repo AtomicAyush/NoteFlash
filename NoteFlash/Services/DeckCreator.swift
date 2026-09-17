@@ -3,8 +3,10 @@ import SwiftData
 
 enum NewDeckSource {
     case text(title: String, notes: String)
-    /// A PDF or PowerPoint file from Files.
-    case file(fileName: String, data: Data)
+    /// A PDF, PowerPoint, or image file. `title` overrides the generated deck title.
+    case file(fileName: String, data: Data, title: String? = nil)
+    /// Photos or exported pages, made into one deck with a page per image.
+    case images(name: String, data: [Data], title: String? = nil)
     case drive(DriveFileReference, autoSync: Bool)
 }
 
@@ -21,7 +23,7 @@ enum DeckCreator {
             switch self {
             case .emptyNotes: "There aren't any notes to make cards from."
             case .unreadablePDF: "That file couldn't be opened as a PDF."
-            case .unsupportedFile: "NoteFlash can read PDFs and PowerPoint (.pptx) files."
+            case .unsupportedFile: "NoteFlash can read PDFs, PowerPoint (.pptx) files, and images."
             case .pdfTooLarge: "That PDF is too large and has no selectable text. Try splitting it into smaller files."
             case .noCards: "Couldn't find anything in these notes to make flashcards from."
             }
@@ -55,7 +57,7 @@ enum DeckCreator {
             )
             return try insert(deck, cards: generated.cards, into: context)
 
-        case .file(let fileName, let data) where PowerPointTextExtractor.isPresentation(data):
+        case .file(let fileName, let data, let title) where PowerPointTextExtractor.isPresentation(data):
             reporter.send(.phase("Reading your slides"))
             let slides = try await readPowerPoint(data)
             let notes = slides.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -65,7 +67,7 @@ enum DeckCreator {
                 from: .text(notes), density: density, progress: reporter.generationHandler
             )
             let deck = Deck(
-                title: generated.title,
+                title: preferred(title, over: generated.title),
                 sourceKind: .powerPoint,
                 sourceName: fileName,
                 sourceText: notes,
@@ -73,30 +75,26 @@ enum DeckCreator {
             )
             return try insert(deck, cards: generated.cards, into: context)
 
-        case .file(let fileName, let data):
+        case .file(let fileName, let data, let title) where ImageNotes.isImage(data):
+            return try await imageDeck(
+                [data], name: fileName, title: title, density: density,
+                engine: engine, engineKind: engineKind, context: context, reporter: reporter
+            )
+
+        case .images(let name, let images, let title):
+            return try await imageDeck(
+                images, name: name, title: title, density: density,
+                engine: engine, engineKind: engineKind, context: context, reporter: reporter
+            )
+
+        case .file(let fileName, let data, let title):
             guard data.starts(with: Data("%PDF".utf8)) || PDFTextExtractor.pageCount(of: data) != nil else {
                 throw CreationError.unsupportedFile
             }
-            reporter.send(.phase("Reading your PDF"))
-            let extracted = await PDFTextExtractor.extract(from: data) { page, total in
-                reporter.send(.phase("Reading page \(page) of \(total)"))
-            }
-            guard let extracted else { throw CreationError.unreadablePDF }
-            reporter.send(.workload(characters: workload(forPDF: data, pages: extracted.pageCount, text: extracted.text, engine: engineKind), engine: engineKind))
-            let generated = try await engine.generateDeck(
-                from: .pdf(data: data, text: extracted.text),
-                density: density,
-                progress: reporter.generationHandler
+            return try await pdfDeck(
+                data, fileName: fileName, title: title, reading: "your PDF", density: density,
+                engine: engine, engineKind: engineKind, context: context, reporter: reporter
             )
-            let deck = Deck(
-                title: generated.title,
-                sourceKind: .pdf,
-                sourceName: fileName,
-                sourceText: extracted.text,
-                density: density
-            )
-            deck.sourcePDF = data
-            return try insert(deck, cards: generated.cards, into: context)
 
         case .drive(let reference, let autoSync):
             reporter.send(.phase("Opening \(reference.kind?.label ?? "your file")"))
@@ -133,6 +131,49 @@ enum DeckCreator {
             deck.lastCheckedAt = .now
             return try insert(deck, cards: generated.cards, into: context)
         }
+    }
+
+    private static func imageDeck(
+        _ images: [Data], name: String, title: String?, density: CardDensity,
+        engine: any FlashcardEngine, engineKind: AIEngineKind, context: ModelContext, reporter: ProcessingReporter
+    ) async throws -> Deck {
+        reporter.send(.phase(images.count == 1 ? "Preparing your image" : "Preparing \(images.count) images"))
+        guard let pdf = await ImageNotes.makePDF(from: images) else { throw CreationError.unsupportedFile }
+        return try await pdfDeck(
+            pdf, fileName: name, title: title, reading: images.count == 1 ? "your image" : "your images",
+            density: density, engine: engine, engineKind: engineKind, context: context, reporter: reporter
+        )
+    }
+
+    private static func pdfDeck(
+        _ data: Data, fileName: String, title: String?, reading: String, density: CardDensity,
+        engine: any FlashcardEngine, engineKind: AIEngineKind, context: ModelContext, reporter: ProcessingReporter
+    ) async throws -> Deck {
+        reporter.send(.phase("Reading \(reading)"))
+        let extracted = await PDFTextExtractor.extract(from: data) { page, total in
+            reporter.send(.phase(total == 1 ? "Reading \(reading)" : "Reading page \(page) of \(total)"))
+        }
+        guard let extracted else { throw CreationError.unreadablePDF }
+        reporter.send(.workload(characters: workload(forPDF: data, pages: extracted.pageCount, text: extracted.text, engine: engineKind), engine: engineKind))
+        let generated = try await engine.generateDeck(
+            from: .pdf(data: data, text: extracted.text),
+            density: density,
+            progress: reporter.generationHandler
+        )
+        let deck = Deck(
+            title: preferred(title, over: generated.title),
+            sourceKind: .pdf,
+            sourceName: fileName,
+            sourceText: extracted.text,
+            density: density
+        )
+        deck.sourcePDF = data
+        return try insert(deck, cards: generated.cards, into: context)
+    }
+
+    private static func preferred(_ title: String?, over generated: String) -> String {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? generated : trimmed
     }
 
     /// Claude reads a PDF itself, so its workload follows the page count.
