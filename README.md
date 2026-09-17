@@ -21,7 +21,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
 - **Comments and exam priorities (Google Docs and Slides):** comments and replies are read along with the notes, since they often hold extra notes.
   - **Exam priorities:** comments that say a point will be on the exam, test, quiz, midterm, or final (or say "important", "know this", or "high-yield") mark that point as an exam priority, and so do lines in the notes that say so.
   - **Coverage:** every exam priority gets cards, even in a compact deck.
-  - **Marking:** those cards are marked **On the exam**, listed first, and can be studied on their own.
+  - **Marking:** those cards are marked **On the exam** and listed first. A deck with any of them gets an **All / On the exam / Starred** picker under the study modes, so you can study just those.
   - **Sync:** adding or editing a comment updates the deck like any other change.
 - **Sharing a deck:** **Share Deck** sends the deck as a single web page file. Anyone can open it — on a phone, a computer, or in email — and study it there or print it; nothing is uploaded and no account is needed. Someone who has NoteFlash can open the same file in the app, which adds the cards exactly as written, exam priorities and notes included, with their own study progress.
 - **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
@@ -42,7 +42,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Time estimates:** they learn how fast your device (or Claude) actually is.
   - **Troubleshooting:** a failed job shows the error details, and Settings → Processing Log keeps a history you can copy. The log screen's **Check Apple Intelligence** button sends a few test requests to the on-device model and records the results.
 - **Deck list sorting:** Name, Last modified, Last modified by me, Last opened by me, or Date created, in either direction. Tap the list header to flip the order.
-- **Deck tools:** stars, a "study starred only" filter, search, editing notes (text decks), regenerating a deck, and resetting progress.
+- **Deck tools:** stars and a study filter (all cards, exam priorities, or starred), search, editing notes (text decks), regenerating a deck, and resetting progress.
 
 ## Requirements
 

@@ -9,8 +9,7 @@ struct DeckDetailView: View {
     @Environment(ProcessingCenter.self) private var processing
 
     @State private var studyMode: StudyMode?
-    @State private var starredOnly = false
-    @State private var priorityOnly = false
+    @State private var studyFilter: StudyFilter = .all
     @State private var editingCard: Flashcard?
     @State private var isAddingCard = false
     @State private var isEditingNotes = false
@@ -32,11 +31,17 @@ struct DeckDetailView: View {
     private var deckJob: ProcessingJob? { processing.unfinishedJob(forDeck: deck.id) }
     private var isJobRunning: Bool { deckJob?.isRunning == true }
 
+    /// Which of a deck's cards a study session uses.
+    private enum StudyFilter: Hashable {
+        case all, priority, starred
+    }
+
     private var studyCards: [Flashcard] {
-        var chosen = cards
-        if starredOnly && !starredCards.isEmpty { chosen = chosen.filter(\.isStarred) }
-        if priorityOnly && !priorityCards.isEmpty { chosen = chosen.filter(\.isPriority) }
-        return chosen.isEmpty ? cards : chosen
+        switch studyFilter {
+        case .all: cards
+        case .priority: priorityCards.isEmpty ? cards : priorityCards
+        case .starred: starredCards.isEmpty ? cards : starredCards
+        }
     }
 
     var body: some View {
@@ -68,21 +73,12 @@ struct DeckDetailView: View {
                 }
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
-
-                if !priorityCards.isEmpty {
-                    Toggle(isOn: $priorityOnly) {
-                        Label {
-                            Text("Study only exam priorities (\(priorityCards.count))")
-                        } icon: {
-                            Image(systemName: "flag.fill").foregroundStyle(.orange)
-                        }
-                    }
-                }
-                if !starredCards.isEmpty {
-                    Toggle("Study only starred (\(starredCards.count))", systemImage: "star.fill", isOn: $starredOnly)
-                }
             } header: {
                 Text("Study")
+            }
+
+            if !priorityCards.isEmpty || !starredCards.isEmpty {
+                studyFilterSection
             }
 
             Section {
@@ -171,6 +167,43 @@ struct DeckDetailView: View {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+    }
+
+    /// Picks the cards to study, in its own section so it doesn't crowd the study modes.
+    private var studyFilterSection: some View {
+        Section {
+            Picker("Cards to study", selection: $studyFilter) {
+                Text("All").tag(StudyFilter.all)
+                if !priorityCards.isEmpty {
+                    Text("On the exam").tag(StudyFilter.priority)
+                }
+                if !starredCards.isEmpty {
+                    Text("Starred").tag(StudyFilter.starred)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+            .listRowBackground(Color.clear)
+        } footer: {
+            studyScope
+        }
+        .onChange(of: [priorityCards.count, starredCards.count]) {
+            // A filter with nothing left in it would leave the picker showing no choice at all.
+            if studyFilter == .priority && priorityCards.isEmpty { studyFilter = .all }
+            if studyFilter == .starred && starredCards.isEmpty { studyFilter = .all }
+        }
+    }
+
+    private var studyScope: Text {
+        switch studyFilter {
+        case .all:
+            Text("Studying ^[\(cards.count) card](inflect: true).")
+        case .priority:
+            Text("Studying ^[\(priorityCards.count) card](inflect: true) flagged on the exam.")
+        case .starred:
+            Text("Studying ^[\(starredCards.count) starred card](inflect: true).")
         }
     }
 
