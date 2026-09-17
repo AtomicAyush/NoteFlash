@@ -109,7 +109,7 @@ struct DeckListView: View {
                     .buttonStyle(.borderedProminent)
             }
             .padding(.top, setupProblem == nil ? 0 : 160)
-        } else if filteredDecks.isEmpty {
+        } else if filteredDecks.isEmpty && !searchText.isEmpty {
             ContentUnavailableView.search(text: searchText)
         }
     }

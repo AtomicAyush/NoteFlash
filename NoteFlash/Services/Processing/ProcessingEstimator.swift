@@ -68,11 +68,12 @@ nonisolated struct ProcessingEstimator: Sendable {
         return min(0.97, max(reported, timeBased))
     }
 
-    /// Updates the learned rate with how long this run actually took.
-    func recordCompletion(at end: Date = .now, defaults: UserDefaults = .standard) {
+    /// Updates the learned rate with how long this run actually took, not counting time spent
+    /// waiting out usage limits.
+    func recordCompletion(at end: Date = .now, excluding waited: TimeInterval = 0, defaults: UserDefaults = .standard) {
         guard characters >= 300 else { return }
         let tuning = Tuning(engine)
-        let actual = end.timeIntervalSince(startedAt)
+        let actual = end.timeIntervalSince(startedAt) - waited
         let observedRate = max(0.3, (actual - tuning.base) / (Double(characters) / 1_000))
         let current = defaults.object(forKey: tuning.rateKey) as? Double ?? tuning.secondsPerThousand
         defaults.set(current * 0.6 + observedRate * 0.4, forKey: tuning.rateKey)

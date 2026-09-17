@@ -33,6 +33,12 @@ final class ProcessingJob: Identifiable {
     fileprivate(set) var errorDetail: String?
     /// True while iOS is letting the job keep running after the user leaves the app.
     fileprivate(set) var continuesInBackground = false
+    /// For a job paused by Apple Intelligence's usage limit: when it continues on its own.
+    fileprivate(set) var resumeAt: Date?
+    /// Set while the engine waits out a usage limit.
+    fileprivate(set) var waitingUntil: Date?
+    fileprivate var waitStartedAt: Date?
+    fileprivate var waitedSeconds: TimeInterval = 0
 
     fileprivate var task: Task<Void, Never>?
     fileprivate var systemTask: BGContinuedProcessingTask?
@@ -78,7 +84,8 @@ final class ProcessingJob: Identifiable {
 
     /// "About 40 sec left · Section 2 of 5"
     func statusLine(at date: Date = .now) -> String {
-        guard let remaining = remaining(at: date) else { return phase }
+        // A time estimate means little while waiting out a usage limit.
+        guard waitingUntil == nil, let remaining = remaining(at: date) else { return phase }
         return "\(ETAText.remaining(remaining)) · \(phase)"
     }
 }
@@ -165,19 +172,25 @@ final class ProcessingCenter {
 
     func dismiss(_ job: ProcessingJob) {
         guard !job.isRunning else { return }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.resumeNotificationID(job)])
         jobs.removeAll { $0.id == job.id }
     }
 
     func retry(_ job: ProcessingJob) {
         dismiss(job)
+        // Sections that already finished are reused, so this picks up where the job stopped.
         launch(ProcessingJob(kind: job.kind, title: job.title))
     }
 
-    /// Resumes jobs that paused while the app was in the background, and starts decks for
-    /// notes shared from other apps.
+    /// Resumes jobs that paused while the app was in the background (or whose usage-limit wait
+    /// is over), and starts decks for notes shared from other apps.
     func appDidBecomeActive() {
         SharedNotesImporter.importPending(into: self)
-        for job in jobs where job.state == .paused {
+        resumeReadyJobs()
+    }
+
+    private func resumeReadyJobs() {
+        for job in jobs where job.state == .paused && (job.resumeAt ?? .distantPast) <= .now {
             log.record("Resuming: \(job.title)")
             retry(job)
         }
@@ -376,12 +389,21 @@ final class ProcessingCenter {
         case .generation(let progress):
             job.reportedFraction = max(job.reportedFraction, min(progress.fraction, 1))
             job.phase = progress.detail
+            if let until = progress.waitingUntil {
+                if job.waitStartedAt == nil { job.waitStartedAt = .now }
+                job.waitingUntil = until
+            } else if let started = job.waitStartedAt {
+                job.waitedSeconds += Date.now.timeIntervalSince(started)
+                job.waitStartedAt = nil
+                job.waitingUntil = nil
+            }
         }
         pushSystemProgress(for: job)
     }
 
     private func complete(_ job: ProcessingJob, deckID: UUID, summary: String) {
-        job.estimator?.recordCompletion()
+        let waiting = job.waitStartedAt.map { Date.now.timeIntervalSince($0) } ?? 0
+        job.estimator?.recordCompletion(excluding: job.waitedSeconds + waiting)
         job.reportedFraction = 1
         job.state = .finished(deckID: deckID, summary: summary)
         log.record("Finished in \(Int(Date.now.timeIntervalSince(job.startedAt)))s: \(job.title) (\(summary))")
@@ -407,6 +429,10 @@ final class ProcessingCenter {
             )
             return
         }
+        if case .rateLimited(let resumeAt, let detail)? = error as? AppleFlashcardEngine.EngineError {
+            pauseForUsageLimit(job, until: resumeAt ?? Date.now.addingTimeInterval(5 * 60), detail: detail)
+            return
+        }
         if wasCancelled {
             log.record("Cancelled: \(job.title)")
             jobs.removeAll { $0.id == job.id }
@@ -417,6 +443,34 @@ final class ProcessingCenter {
         job.errorDetail = detail
         job.state = .failed(error.localizedDescription)
         notifyIfInBackground(title: "Couldn't finish “\(job.title)”", body: error.localizedDescription, deckID: nil)
+    }
+
+    /// Apple Intelligence's usage limit was reached: pause, and continue when it resets.
+    private func pauseForUsageLimit(_ job: ProcessingJob, until resumeAt: Date, detail: String?) {
+        let time = resumeAt.formatted(date: .omitted, time: .shortened)
+        log.record("Paused for Apple Intelligence's usage limit until \(time): \(job.title)" + (detail.map { " — \($0)" } ?? ""))
+        job.state = .paused
+        job.resumeAt = resumeAt
+        job.waitingUntil = nil
+        job.errorDetail = detail
+        startTicker()
+
+        // A reminder to open NoteFlash when the job can continue.
+        let content = UNMutableNotificationContent()
+        content.title = "Ready to finish “\(job.title)”"
+        content.body = "Apple Intelligence can continue now. Open NoteFlash to finish the cards."
+        content.sound = .default
+        let delay = max(1, resumeAt.timeIntervalSinceNow)
+        let request = UNNotificationRequest(
+            identifier: Self.resumeNotificationID(job),
+            content: content,
+            trigger: UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
+        )
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+
+    private static func resumeNotificationID(_ job: ProcessingJob) -> String {
+        "resume-\(job.id.uuidString)"
     }
 
     private func endBackgroundWork(for job: ProcessingJob, success: Bool) {
@@ -436,13 +490,17 @@ final class ProcessingCenter {
 
     // MARK: System progress
 
-    /// Updates the system Live Activity every couple of seconds so progress never looks stalled.
+    /// Updates the system Live Activity every couple of seconds so progress never looks stalled,
+    /// and resumes paused jobs once their usage-limit wait is over (while NoteFlash is open).
     private func startTicker() {
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
-            while let self, self.jobs.contains(where: \.isRunning) {
+            while let self, self.jobs.contains(where: { $0.isRunning || $0.resumeAt != nil && $0.state == .paused }) {
                 for job in self.jobs where job.isRunning {
                     self.pushSystemProgress(for: job)
+                }
+                if UIApplication.shared.applicationState == .active {
+                    self.resumeReadyJobs()
                 }
                 try? await Task.sleep(for: .seconds(2))
             }

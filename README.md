@@ -110,7 +110,12 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Live Activity:** the system shows it in the Dynamic Island and on the Lock Screen. The app updates its progress and subtitle ("About 40 sec left · Section 2 of 5").
 - **Heartbeat:** iOS may end continued-processing tasks whose progress stalls, so the reported progress moves forward every 2 seconds, even while the model is between updates.
 - **Fallback:** if iOS declines the request or later withdraws the time, the job keeps running in the app. If the app is in the background when the short grace period runs out, the job pauses and resumes the next time the app becomes active.
-- **Model limits:** Apple's model is rate-limited in the background, so requests wait and retry for about a minute before giving up.
+- **Usage limits:** iOS limits how much Apple Intelligence work an app can do in a stretch, and long notes can reach that limit even while NoteFlash is open. `ModelLimits` handles it:
+  - **Short limits:** it waits until the reset time iOS reports (iOS 27), or backs off from 5 seconds to 2 minutes. The job shows when it will continue.
+  - **Long limits:** if the wait would be longer than 4 minutes, the job pauses. It resumes on its own at the reset time while the app is open, and a notification says when it can continue.
+  - **No repeated work:** finished sections are kept in memory (`SectionCache`), so a resumed or retried job skips them. Optional extra passes are skipped for 15 minutes after a limit.
+  - **Shorter responses:** each request caps its response length, so a model that starts repeating itself stops early.
+- **Stalls:** the model service sometimes stops mid-response for a minute or more. Responses are consumed on a separate task and watched. A response with no output for 20 seconds (45 before the first output) is cancelled and retried, up to twice. If it already wrote a good share of the section's cards, those are kept instead. Non-streaming requests get the same timeout.
 - **Diagnostics:** `DiagnosticsLog` records job events and full error descriptions to the system log (subsystem `com.ayushkansal.NoteFlash`) and to `Documents/NoteFlash-processing-log.txt`.
 - **Time estimates:** `ProcessingEstimator` starts from a per-engine rate (seconds per 1,000 characters), blends in the observed pace as progress arrives, and saves the rate it measures when each job finishes.
 

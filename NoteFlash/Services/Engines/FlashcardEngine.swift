@@ -56,6 +56,8 @@ nonisolated struct GenerationProgress: Sendable {
     var fraction: Double
     /// Short status, e.g. "Section 2 of 5".
     var detail: String
+    /// Set while the engine waits out a usage limit, until the time it continues.
+    var waitingUntil: Date? = nil
 }
 
 typealias GenerationProgressHandler = @Sendable (GenerationProgress) -> Void

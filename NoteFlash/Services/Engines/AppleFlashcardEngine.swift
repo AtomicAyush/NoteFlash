@@ -67,7 +67,8 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     enum EngineError: LocalizedError {
         case unavailable(String)
         case blockedBySafetyFilter
-        case rateLimited
+        /// iOS's usage limit for Apple Intelligence was reached; work can resume at `resumeAt`.
+        case rateLimited(resumeAt: Date?, detail: String?)
         case unsupportedLanguage
         case tooLong
         case timedOut
@@ -82,8 +83,12 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 reason
             case .blockedBySafetyFilter:
                 "Apple Intelligence's safety filter declined these notes. Try switching to Claude in Settings."
-            case .rateLimited:
-                "Apple Intelligence is busy. Try again in a moment."
+            case .rateLimited(let resumeAt, _):
+                if let resumeAt, resumeAt > .now {
+                    "Apple Intelligence reached its usage limit for now. It can continue at \(resumeAt.formatted(date: .omitted, time: .shortened))."
+                } else {
+                    "Apple Intelligence reached its usage limit for now. Try again in a few minutes."
+                }
             case .unsupportedLanguage:
                 "Apple Intelligence doesn't support the language of these notes yet. Try switching to Claude in Settings."
             case .tooLong:
@@ -128,6 +133,12 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     }
 
     private static let options = GenerationOptions(temperature: 0.3)
+
+    /// Caps a response's length, so a model that starts repeating itself stops early instead of
+    /// using up the time and usage limit.
+    private static func options(maxTokens: Int) -> GenerationOptions {
+        GenerationOptions(temperature: 0.3, maximumResponseTokens: maxTokens)
+    }
     /// Cards reviewed per edited section, in batches small enough for the context window.
     private static let maxReviewedCards = 40
     private static let reviewBatchSize = 8
@@ -158,11 +169,18 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     /// What happened while writing one section, for progress reporting.
     private enum SectionEvent {
         case cards(Int)
-        case waiting
+        /// Waiting out the usage limit until this time.
+        case waiting(Date)
     }
 
-    /// iOS limits on-device model use in the background; retry for about a minute before giving up.
-    private static let rateLimitRetries = 12
+    static func waitingDetail(until date: Date) -> String {
+        "Apple Intelligence needs a break · continuing at \(date.formatted(date: .omitted, time: .shortened))"
+    }
+
+    /// Whether a section's result can be reused if the job runs again.
+    private final class SectionOutcome {
+        var isComplete = true
+    }
 
     func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
         let notes = source.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -202,7 +220,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         guard cloud.isAvailable else { return nil }
         let contextSize = try await cloud.contextSize
         let chunks = NoteChunker.chunks(of: notes, maxCharacters: Self.chunkCharacters(forContextSize: contextSize))
-        return try await generate(chunks: chunks, density: density, progress: progress) {
+        return try await generate(chunks: chunks, density: density, progress: progress, model: "cloud") {
             LanguageModelSession(model: cloud, instructions: instructions)
         }
     }
@@ -211,6 +229,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         chunks: [String],
         density: CardDensity,
         progress: GenerationProgressHandler?,
+        model: String = "device",
         makeSession: () -> LanguageModelSession
     ) async throws -> GeneratedDeck {
         var title: String?
@@ -230,21 +249,35 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 progress?(GenerationProgress(fraction: overall * 0.97, detail: detail))
             }
             report(0, label)
+            let cacheKey = SectionCache.key(model: model, density: density, request: request, text: chunk)
+            if let cached = SectionCache.shared.entry(for: cacheKey) {
+                // Finished before (this job is a retry or a resumed job).
+                if title == nil, let cachedTitle = cached.title, !cachedTitle.isEmpty { title = cachedTitle }
+                cards += cached.cards
+                report(1, label)
+                continue
+            }
             do {
+                let outcome = SectionOutcome()
                 let section = try await sectionCards(
                     for: chunk,
                     request: request,
                     density: density,
+                    outcome: outcome,
                     onEvent: { event in
                         switch event {
                         case .cards(let count):
                             report(min(0.95, Double(count) / expectedCards), label)
-                        case .waiting:
-                            report(0, "Waiting for Apple Intelligence")
+                        case .waiting(let until):
+                            let overall = Double(index) / Double(chunks.count) * 0.97
+                            progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
                         }
                     },
                     makeSession: makeSession
                 )
+                if outcome.isComplete {
+                    SectionCache.shared.store(SectionCache.Entry(title: section.title, cards: section.cards), for: cacheKey)
+                }
                 if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
                     title = sectionTitle
                 }
@@ -275,19 +308,21 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         for text: String,
         request: String,
         density: CardDensity,
+        outcome: SectionOutcome = SectionOutcome(),
         onEvent: (SectionEvent) -> Void,
         makeSession: () -> LanguageModelSession
     ) async throws -> SectionCards {
         let instructions = Self.generationInstructions(density: density)
         let cap = Self.maximumCardCount(for: text, density: density)
         do {
-            let sets = try await cardSets(for: text, request: request, cap: cap, onEvent: onEvent, makeSession: makeSession)
+            let sets = try await cardSets(for: text, request: request, cap: cap, outcome: outcome, onEvent: onEvent, makeSession: makeSession)
             var cards = Self.faithful(sets.flatMap(\.cards).map(\.card), to: text)
-            // The model sometimes stops early; top up a thin section with a plain-text pass.
-            if cards.count < Self.minimumCardCount(for: text, density: density) {
+            // The model sometimes stops early; top up a thin section with a plain-text pass,
+            // unless the usage limit was hit recently (the extra pass is optional).
+            if cards.count < Self.minimumCardCount(for: text, density: density), !ModelLimits.wasLimitedRecently {
                 let found = cards.count
                 let extra = (try? await plainTextCards(
-                    for: text, request: request, instructions: instructions, cap: cap,
+                    for: text, request: request, instructions: instructions, cap: cap, outcome: outcome,
                     onEvent: { event in
                         if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                     }
@@ -305,7 +340,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 let extra: [GeneratedCard]
                 do {
                     extra = try await plainTextCards(
-                        for: text, request: request, instructions: instructions, cap: cap,
+                        for: text, request: request, instructions: instructions, cap: cap, outcome: outcome,
                         onEvent: { event in
                             if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                         }
@@ -373,44 +408,59 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         instructions: String,
         cap: Int,
         depth: Int = 0,
-        attempt: Int = 0,
+        outcome: SectionOutcome,
         onEvent: (SectionEvent) -> Void
     ) async throws -> [GeneratedCard] {
-        let session = LanguageModelSession(
-            model: Self.permissiveModel,
-            instructions: """
-                \(instructions)
-
-                Write each card as two lines, then a blank line:
-                Q: <question>
-                A: <answer>
-                Keep each answer short: the name, date, term, or phrase that answers the question, \
-                not the whole sentence from the notes. Write nothing else.
-                """
-        )
         do {
-            var latest = ""
-            let stream = session.streamResponse(to: "\(request)\n\nNOTES:\n\(text)", options: Self.options)
-            for try await snapshot in stream {
-                latest = snapshot.content
-                let count = Self.answerCount(in: latest)
-                onEvent(.cards(count))
-                if count > cap { break }
+            return try await ModelLimits.run(onWait: { onEvent(.waiting($0)) }) {
+                let session = LanguageModelSession(
+                    model: Self.permissiveModel,
+                    instructions: """
+                        \(instructions)
+
+                        Write each card as two lines, then a blank line:
+                        Q: <question>
+                        A: <answer>
+                        Keep each answer short: the name, date, term, or phrase that answers the question, \
+                        not the whole sentence from the notes. Write nothing else.
+                        """
+                )
+                let prompt = "\(request)\n\nNOTES:\n\(text)"
+                let options = Self.options(maxTokens: min(3_000, 200 + cap * 50))
+                var latest = ""
+                var end = ModelLimits.StreamEnd.finished
+                do {
+                    (_, end) = try await ModelLimits.watch(
+                        produce: { box in
+                            for try await snapshot in session.streamResponse(to: prompt, options: options) {
+                                box.update(snapshot.content)
+                                if box.isStopRequested { break }
+                            }
+                        },
+                        onOutput: { (content: String, stop) in
+                            latest = content
+                            let count = Self.answerCount(in: content)
+                            onEvent(.cards(count))
+                            if count > cap { stop() }
+                        }
+                    )
+                } catch where !(error is CancellationError) && !Self.parsePlainTextCards(latest).isEmpty {
+                    // Keep the cards written before the model stopped.
+                    end = .stalled
+                }
+                let cards = Self.parsePlainTextCards(latest)
+                if end == .stalled {
+                    guard cards.count >= max(1, cap / 4) else { throw ModelLimits.Stalled() }
+                    outcome.isComplete = false
+                }
+                return Array(cards.prefix(cap))
             }
-            return Array(Self.parsePlainTextCards(latest).prefix(cap))
-        } catch where AppleModelFailure(error) == .rateLimited && attempt < Self.rateLimitRetries {
-            onEvent(.waiting)
-            try await Task.sleep(for: .seconds(5))
-            return try await plainTextCards(
-                for: text, request: request, instructions: instructions,
-                cap: cap, depth: depth, attempt: attempt + 1, onEvent: onEvent
-            )
         } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             var cards: [GeneratedCard] = []
             for half in NoteChunker.halves(of: text) where half != text {
                 let found = cards.count
                 cards += try await plainTextCards(
-                    for: half, request: request, instructions: instructions, cap: cap, depth: depth + 1,
+                    for: half, request: request, instructions: instructions, cap: cap, depth: depth + 1, outcome: outcome,
                     onEvent: { event in
                         if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                     }
@@ -455,13 +505,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
 
     /// Generates cards for one section, streaming so progress can be reported. Halves the
     /// section if the model runs past its context window (the small model occasionally
-    /// rambles even on short notes), and waits out background rate limits.
+    /// rambles even on short notes), and waits out usage limits.
     private func cardSets(
         for text: String,
         request: String,
         cap: Int,
         depth: Int = 0,
-        attempt: Int = 0,
+        outcome: SectionOutcome,
         onEvent: (SectionEvent) -> Void,
         makeSession: () -> LanguageModelSession
     ) async throws -> [AppleCardSet] {
@@ -472,32 +522,41 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             \(text)
             """
         do {
-            let stream = makeSession().streamResponse(to: prompt, generating: AppleCardSet.self, options: Self.options)
-            var latest: AppleCardSet.PartiallyGenerated?
-            var sawSnapshot = false
-            for try await snapshot in stream {
-                sawSnapshot = true
-                latest = snapshot.content
-                let count = snapshot.content.cards?.count ?? 0
-                onEvent(.cards(count))
-                // Stop a runaway response; the cards written so far are kept below.
-                if count > cap { break }
+            return try await ModelLimits.run(onWait: { onEvent(.waiting($0)) }) {
+                let session = makeSession()
+                let options = Self.options(maxTokens: min(4_000, 300 + cap * 75))
+                var latest: AppleCardSet.PartiallyGenerated?
+                var end = ModelLimits.StreamEnd.finished
+                do {
+                    (_, end) = try await ModelLimits.watch(
+                        produce: { box in
+                            for try await snapshot in session.streamResponse(to: prompt, generating: AppleCardSet.self, options: options) {
+                                box.update(snapshot.content)
+                                if box.isStopRequested { break }
+                            }
+                        },
+                        onOutput: { (content: AppleCardSet.PartiallyGenerated, stop) in
+                            latest = content
+                            let count = content.cards?.count ?? 0
+                            onEvent(.cards(count))
+                            // Stop a runaway response; the cards written so far are kept below.
+                            if count > cap { stop() }
+                        }
+                    )
+                } catch where !(error is CancellationError) && !Self.completeCards(in: latest).isEmpty {
+                    // The model stopped partway (for example at its length cap); keep what it wrote.
+                    end = .stalled
+                }
+                if end == .stalled {
+                    // Keep a stalled response only if it got a good way through the section.
+                    guard Self.completeCards(in: latest).count >= max(1, cap / 4) else { throw ModelLimits.Stalled() }
+                    outcome.isComplete = false
+                }
+                guard let latest else { throw EngineError.generationFailed("The model returned no output.") }
+                // Build the result from the last snapshot rather than re-parsing the raw output.
+                let cards = Array(Self.completeCards(in: latest).prefix(cap))
+                return [AppleCardSet(title: latest.title ?? "", cards: cards)]
             }
-            guard sawSnapshot, let latest else { throw EngineError.generationFailed("The model returned no output.") }
-            // Build the result from the last snapshot rather than re-parsing the raw output.
-            let cards = (latest.cards ?? []).prefix(cap).compactMap { partial -> AppleCard? in
-                guard let question = partial.question, let answer = partial.answer,
-                      !question.isEmpty, !answer.isEmpty else { return nil }
-                return AppleCard(fact: partial.fact ?? "", question: question, answer: answer)
-            }
-            return [AppleCardSet(title: latest.title ?? "", cards: cards)]
-        } catch where AppleModelFailure(error) == .rateLimited && attempt < Self.rateLimitRetries {
-            onEvent(.waiting)
-            try await Task.sleep(for: .seconds(5))
-            return try await cardSets(
-                for: text, request: request, cap: cap, depth: depth, attempt: attempt + 1,
-                onEvent: onEvent, makeSession: makeSession
-            )
         } catch where [.contextExceeded, .timeout].contains(AppleModelFailure(error)) && depth < 3 {
             let halves = NoteChunker.halves(of: text)
             guard halves.count > 1 else { throw error }
@@ -505,7 +564,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             for half in halves {
                 let found = sets.reduce(0) { $0 + $1.cards.count }
                 sets += try await cardSets(
-                    for: half, request: request, cap: cap, depth: depth + 1,
+                    for: half, request: request, cap: cap, depth: depth + 1, outcome: outcome,
                     onEvent: { event in
                         if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                     },
@@ -513,6 +572,14 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 )
             }
             return sets
+        }
+    }
+
+    private static func completeCards(in snapshot: AppleCardSet.PartiallyGenerated?) -> [AppleCard] {
+        (snapshot?.cards ?? []).compactMap { partial -> AppleCard? in
+            guard let question = partial.question, let answer = partial.answer,
+                  !question.isEmpty, !answer.isEmpty else { return nil }
+            return AppleCard(fact: partial.fact ?? "", question: question, answer: answer)
         }
     }
 
@@ -532,12 +599,15 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             model: SystemLanguageModel.default,
             instructions: "You name flashcard decks made from a student's notes."
         )
-        let response = try await session.respond(
-            to: "Suggest a title for a flashcard deck made from notes covering:\n\(outline)",
-            generating: AppleDeckTitle.self,
-            options: options
-        )
-        let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleOptions = options(maxTokens: 64)
+        let response = try await ModelLimits.withTimeout(20) {
+            try await session.respond(
+                to: "Suggest a title for a flashcard deck made from notes covering:\n\(outline)",
+                generating: AppleDeckTitle.self,
+                options: titleOptions
+            ).content
+        }
+        let title = response.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? nil : title
     }
 
@@ -581,7 +651,9 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                         onEvent: { event in
                             switch event {
                             case .cards(let count): report(0.35 + 0.6 * min(1, Double(count) / expectedCards), label)
-                            case .waiting: report(0.35, "Waiting for Apple Intelligence")
+                            case .waiting(let until):
+                                let overall = (Double(index) + 0.35) / Double(hunks.count) * 0.98
+                                progress?(GenerationProgress(fraction: overall, detail: Self.waitingDetail(until: until), waitingUntil: until))
                             }
                         },
                         into: &revision
@@ -711,10 +783,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     private static func reviewDecisions(for hunk: TextDiff.Hunk, cards: [ExistingCard]) async throws -> [ReviewDecision] {
         let prompt = reviewPrompt(hunk: hunk, cards: cards)
         do {
-            let review = try await retryingRateLimits {
-                try await onDeviceSession(reviewInstructions).respond(
-                    to: prompt, generating: AppleCardReview.self, options: options
-                ).content
+            let reviewOptions = options(maxTokens: 400 + cards.count * 120)
+            let review = try await ModelLimits.run {
+                try await ModelLimits.withTimeout {
+                    try await onDeviceSession(reviewInstructions).respond(
+                        to: prompt, generating: AppleCardReview.self, options: reviewOptions
+                    ).content
+                }
             }
             return review.decisions.map { decision in
                 ReviewDecision(
@@ -735,8 +810,11 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     c3: update | <corrected question> | <corrected answer>
                     """
             )
-            let text = try await retryingRateLimits {
-                try await session.respond(to: prompt, options: options).content
+            let textOptions = options(maxTokens: 200 + cards.count * 60)
+            let text = try await ModelLimits.run {
+                try await ModelLimits.withTimeout {
+                    try await session.respond(to: prompt, options: textOptions).content
+                }
             }
             return parsePlainTextReviewDecisions(text)
         }
@@ -767,19 +845,6 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             ))
         }
         return decisions
-    }
-
-    /// Runs model work, waiting out the limits iOS puts on background use.
-    private static func retryingRateLimits<T>(_ work: () async throws -> T) async throws -> T {
-        var attempt = 0
-        while true {
-            do {
-                return try await work()
-            } catch where AppleModelFailure(error) == .rateLimited && attempt < rateLimitRetries {
-                attempt += 1
-                try await Task.sleep(for: .seconds(5))
-            }
-        }
     }
 
     /// Writes cards for the lines this hunk added, using the nearest heading as context.
@@ -876,10 +941,14 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     private static func friendlyError(_ error: Error) -> Error {
         switch AppleModelFailure(error) {
         case .guardrail: EngineError.blockedBySafetyFilter
-        case .rateLimited: EngineError.rateLimited
+        case .rateLimited, .busy:
+            error as? EngineError ?? EngineError.rateLimited(
+                resumeAt: ModelLimits.resetDate(of: error) ?? Date.now.addingTimeInterval(5 * 60),
+                detail: String(reflecting: error)
+            )
         case .unsupportedLanguage: EngineError.unsupportedLanguage
         case .contextExceeded: EngineError.tooLong
-        case .timeout: EngineError.timedOut
+        case .timeout, .stalled: EngineError.timedOut
         case .assetsUnavailable: EngineError.modelNotReady(String(reflecting: error))
         case .cancelled: error
         case .structuredOutput, .other:
@@ -895,6 +964,10 @@ nonisolated enum AppleModelFailure: Equatable {
     case contextExceeded
     case guardrail
     case rateLimited
+    /// The session is still answering an earlier request.
+    case busy
+    /// A response stopped arriving and was cancelled.
+    case stalled
     case unsupportedLanguage
     /// The model's assets aren't on the device yet (downloading or updating).
     case assetsUnavailable
@@ -910,11 +983,20 @@ nonisolated enum AppleModelFailure: Equatable {
             self = .cancelled
             return
         }
+        if case .rateLimited? = error as? AppleFlashcardEngine.EngineError {
+            self = .rateLimited
+            return
+        }
+        if error is ModelLimits.Stalled {
+            self = .stalled
+            return
+        }
         if let error = error as? LanguageModelSession.GenerationError {
             switch error {
             case .exceededContextWindowSize: self = .contextExceeded
             case .guardrailViolation, .refusal: self = .guardrail
-            case .rateLimited, .concurrentRequests: self = .rateLimited
+            case .rateLimited: self = .rateLimited
+            case .concurrentRequests: self = .busy
             case .unsupportedLanguageOrLocale: self = .unsupportedLanguage
             case .assetsUnavailable: self = .assetsUnavailable
             case .decodingFailure, .unsupportedGuide: self = .structuredOutput
@@ -936,7 +1018,7 @@ nonisolated enum AppleModelFailure: Equatable {
                 return
             }
             if let error = error as? LanguageModelSession.Error, error == .concurrentRequests {
-                self = .rateLimited
+                self = .busy
                 return
             }
             if error is SystemLanguageModel.Error {
@@ -958,7 +1040,7 @@ nonisolated enum AppleModelFailure: Equatable {
     /// Worth retrying as a plain-text request under the permissive guardrails.
     var allowsPlainTextRetry: Bool {
         switch self {
-        case .guardrail, .structuredOutput, .timeout, .other: true
+        case .guardrail, .structuredOutput, .timeout, .stalled, .other: true
         default: false
         }
     }

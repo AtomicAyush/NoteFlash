@@ -68,15 +68,39 @@ nonisolated struct SampleFlashcardEngine: FlashcardEngine {
         let lines = TextDiff.lines(of: source.text).filter { !$0.hasPrefix("#") }
         let sections = max(1, min(4, lines.count / 3))
         let steps = 24
+        let simulatesLimit = Self.takeSimulatedLimit()
         for step in 0..<steps {
             try await Task.sleep(for: .milliseconds(750))
             let section = min(sections, step * sections / steps + 1)
             progress?(GenerationProgress(fraction: Double(step + 1) / Double(steps), detail: "Section \(section) of \(sections)"))
+            if simulatesLimit && step == 6 {
+                // A short wait, then a limit too long to wait out (see `-simulateUsageLimit`).
+                let until = Date.now.addingTimeInterval(6)
+                progress?(GenerationProgress(fraction: 0.29, detail: AppleFlashcardEngine.waitingDetail(until: until), waitingUntil: until))
+                try await Task.sleep(for: .seconds(6))
+            }
+            if simulatesLimit && step == 10 {
+                throw AppleFlashcardEngine.EngineError.rateLimited(
+                    resumeAt: Date.now.addingTimeInterval(25), detail: "Simulated usage limit (-simulateUsageLimit)"
+                )
+            }
         }
         let cards = lines.map { line in
             GeneratedCard(front: "What do the notes say about “\(line.prefix(30))”?", back: line)
         }
         return GeneratedDeck(title: "Sample Deck", cards: cards)
+    }
+
+    private static let limitLock = NSLock()
+    nonisolated(unsafe) private static var limitSimulated = false
+
+    /// With `-simulateUsageLimit`, the first deck made hits a fake usage limit.
+    private static func takeSimulatedLimit() -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("-simulateUsageLimit") else { return false }
+        return limitLock.withLock {
+            defer { limitSimulated = true }
+            return !limitSimulated
+        }
     }
 
     func reviseDeck(

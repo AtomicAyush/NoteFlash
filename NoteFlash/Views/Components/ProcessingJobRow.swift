@@ -43,19 +43,20 @@ struct ProcessingJobRow: View {
         case .paused:
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "pause.circle.fill")
+                    Image(systemName: job.resumeAt == nil ? "pause.circle.fill" : "hourglass.circle.fill")
                         .font(.title3)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(job.resumeAt == nil ? Color.secondary : Color.accentColor)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(job.title)
                             .font(.headline)
                             .lineLimit(1)
-                        Text("Paused while NoteFlash was in the background. It picks up again when you open the app.")
+                        pausedMessage
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-                actions(primary: "Resume", systemImage: "play.fill")
+                details
+                actions(primary: job.resumeAt == nil ? "Resume" : "Try Now", systemImage: "play.fill")
             }
             .padding(.vertical, 2)
         case .failed(let message):
@@ -73,19 +74,43 @@ struct ProcessingJobRow: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let detail = job.errorDetail {
-                    DisclosureGroup("Details") {
-                        Text(detail)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .font(.caption)
-                }
+                details
                 actions(primary: "Retry", systemImage: "arrow.clockwise")
             }
             .padding(.vertical, 2)
+        }
+    }
+
+    @ViewBuilder
+    private var pausedMessage: some View {
+        if let resumeAt = job.resumeAt {
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                let when = resumeAt <= context.date
+                    ? "any moment now"
+                    : "at \(resumeAt.formatted(date: .omitted, time: .shortened))"
+                switch job.kind {
+                case .newDeck, .regenerate:
+                    Text("Apple Intelligence reached its usage limit for now. Finished sections are kept, and the rest continues \(when) while NoteFlash is open.")
+                case .updateNotes, .syncDoc:
+                    Text("Apple Intelligence reached its usage limit for now. The update runs again \(when) while NoteFlash is open.")
+                }
+            }
+        } else {
+            Text("Paused while NoteFlash was in the background. It picks up again when you open the app.")
+        }
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        if let detail = job.errorDetail {
+            DisclosureGroup("Details") {
+                Text(detail)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.caption)
         }
     }
 
