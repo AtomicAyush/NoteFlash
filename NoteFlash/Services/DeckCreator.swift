@@ -1,0 +1,106 @@
+import Foundation
+import SwiftData
+
+enum NewDeckSource {
+    case text(title: String, notes: String)
+    case pdf(fileName: String, data: Data)
+    case googleDoc(link: String, autoSync: Bool)
+}
+
+/// Builds a new deck with the AI engine chosen in Settings.
+enum DeckCreator {
+    enum CreationError: LocalizedError {
+        case emptyNotes
+        case unreadablePDF
+        case pdfTooLarge
+        case noCards
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyNotes: "There aren't any notes to make cards from."
+            case .unreadablePDF: "That file couldn't be opened as a PDF."
+            case .pdfTooLarge: "That PDF is too large and has no selectable text. Try splitting it into smaller files."
+            case .noCards: "Couldn't find anything in these notes to make flashcards from."
+            }
+        }
+    }
+
+    static func createDeck(
+        from source: NewDeckSource,
+        density: CardDensity,
+        sync: DocSyncService,
+        context: ModelContext
+    ) async throws -> Deck {
+        let engine = try AIEngineKind.selected.makeEngine()
+
+        switch source {
+        case .text(let title, let notes):
+            let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw CreationError.emptyNotes }
+            let generated = try await engine.generateDeck(from: .text(trimmed), density: density)
+            let deckTitle = title.trimmingCharacters(in: .whitespaces)
+            let deck = Deck(
+                title: deckTitle.isEmpty ? generated.title : deckTitle,
+                sourceKind: .text,
+                sourceText: trimmed,
+                density: density
+            )
+            return try insert(deck, cards: generated.cards, into: context)
+
+        case .pdf(let fileName, let data):
+            guard let extracted = await PDFTextExtractor.extract(from: data) else {
+                throw CreationError.unreadablePDF
+            }
+            let generated = try await engine.generateDeck(
+                from: .pdf(data: data, text: extracted.text),
+                density: density
+            )
+            let deck = Deck(
+                title: generated.title,
+                sourceKind: .pdf,
+                sourceName: fileName,
+                sourceText: extracted.text,
+                density: density
+            )
+            deck.sourcePDF = data
+            return try insert(deck, cards: generated.cards, into: context)
+
+        case .googleDoc(let link, let autoSync):
+            guard let documentID = GoogleDocsClient.documentID(from: link) else {
+                throw GoogleDocsClient.DocsError.invalidLink
+            }
+            let document = try await sync.fetchDocument(id: documentID)
+            let notes = document.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !notes.isEmpty else { throw CreationError.emptyNotes }
+            let generated = try await engine.generateDeck(from: .text(notes), density: density)
+
+            let docTitle = document.title.flatMap { $0 == "Untitled document" ? nil : $0 }
+            let deck = Deck(
+                title: docTitle ?? generated.title,
+                sourceKind: .googleDoc,
+                sourceName: document.title,
+                sourceText: document.text,
+                density: density
+            )
+            deck.googleDocID = documentID
+            deck.googleDocURL = GoogleDocsClient.editURL(for: documentID)?.absoluteString ?? link
+            deck.sourceHash = TextDiff.fingerprint(of: document.text)
+            deck.autoSync = autoSync
+            deck.lastCheckedAt = .now
+            return try insert(deck, cards: generated.cards, into: context)
+        }
+    }
+
+    private static func insert(_ deck: Deck, cards: [GeneratedCard], into context: ModelContext) throws -> Deck {
+        guard !cards.isEmpty else { throw CreationError.noCards }
+        context.insert(deck)
+        for card in cards {
+            deck.addCard(
+                front: card.front.trimmingCharacters(in: .whitespacesAndNewlines),
+                back: card.back.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        try context.save()
+        return deck
+    }
+}
