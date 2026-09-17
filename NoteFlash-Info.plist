@@ -20,6 +20,7 @@
 			<array>
 				<string>com.adobe.pdf</string>
 				<string>org.openxmlformats.presentationml.presentation</string>
+				<string>public.html</string>
 				<string>public.image</string>
 				<string>public.plain-text</string>
 			</array>

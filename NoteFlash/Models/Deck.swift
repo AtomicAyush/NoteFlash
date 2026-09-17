@@ -123,6 +123,30 @@ final class Deck {
         }
     }
 
+    /// Adds cards exactly as another NoteFlash user shared them, keeping their exam flags.
+    func addSharedCards(_ shared: [SharedDeck.Card]) {
+        for card in shared {
+            let flashcard = Flashcard(
+                front: card.front.trimmingCharacters(in: .whitespacesAndNewlines),
+                back: card.back.trimmingCharacters(in: .whitespacesAndNewlines),
+                order: nextCardOrder
+            )
+            flashcard.isPriority = card.isPriority
+            modelContext?.insert(flashcard)
+            cards.append(flashcard)
+        }
+    }
+
+    /// The deck packed up for sharing.
+    var sharedDeck: SharedDeck {
+        SharedDeck(
+            title: title,
+            density: densityRaw,
+            notes: sourceText,
+            cards: sortedCards.map { SharedDeck.Card(front: $0.front, back: $0.back, isPriority: $0.isPriority) }
+        )
+    }
+
     /// Re-checks which cards cover exam priorities, after the notes or their comments change.
     func refreshPriorities() {
         let items = PriorityNotes.items(in: sourceText)

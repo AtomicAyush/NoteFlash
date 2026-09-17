@@ -562,6 +562,8 @@ final class AppRouter {
 
     var deckToOpen: UUID?
     var incomingNotes: IncomingNotes?
+    /// Decks other NoteFlash users shared, waiting for the user to confirm adding them.
+    var incomingDecks: [IncomingSharedDeck] = []
 
     /// A file sent with "Open in NoteFlash" (or "Copy to NoteFlash") from the share sheet.
     func receive(_ url: URL) {
@@ -578,13 +580,32 @@ final class AppRouter {
         }
         let name = url.lastPathComponent
         let stem = url.deletingPathExtension().lastPathComponent
-        if ["txt", "text", "md", "markdown"].contains(url.pathExtension.lowercased()),
+        if DeckShare.isPage(name: name) {
+            receivePage(data, named: stem)
+        } else if ["txt", "text", "md", "markdown"].contains(url.pathExtension.lowercased()),
            let text = String(data: data, encoding: .utf8) {
             incomingNotes = IncomingNotes(content: .text(title: stem, notes: text))
         } else {
             incomingNotes = IncomingNotes(content: .file(name: name, data: data))
         }
     }
+
+    /// A shared deck if the page holds one, and otherwise the page's text as notes.
+    func receivePage(_ data: Data, named name: String) {
+        if let shared = DeckShare.deck(inPage: data) {
+            incomingDecks.append(IncomingSharedDeck(deck: shared))
+        } else if let text = DeckShare.plainText(ofPage: data), !text.isEmpty {
+            incomingNotes = IncomingNotes(content: .text(title: name, notes: text))
+        } else {
+            DiagnosticsLog.shared.record("Nothing to read in shared page: \(name)")
+        }
+    }
+}
+
+/// A deck another NoteFlash user shared, shown for the user to confirm adding.
+struct IncomingSharedDeck: Identifiable {
+    let id = UUID()
+    let deck: SharedDeck
 }
 
 /// Notes another app handed to NoteFlash, shown in New Deck for the user to confirm.

@@ -53,7 +53,10 @@ enum SharedNotesImporter {
                 DiagnosticsLog.shared.record("Shared file missing: \(name)")
                 continue
             }
-            if imageExtensions.contains((name as NSString).pathExtension.lowercased()) {
+            if DeckShare.isPage(name: name) {
+                // A deck shared from NoteFlash is added as it is; any other page becomes notes.
+                AppRouter.shared.receivePage(data, named: DriveFileReader.stripExtension(name))
+            } else if imageExtensions.contains((name as NSString).pathExtension.lowercased()) {
                 images.append(data)
             } else {
                 documents.append((name, data))

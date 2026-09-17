@@ -16,6 +16,7 @@ struct DeckListView: View {
     @State private var hasAPIKey = KeychainStore.string(for: .anthropicAPIKey) != nil
     @State private var router = AppRouter.shared
     @State private var incomingNotes: IncomingNotes?
+    @State private var importingDeck: IncomingSharedDeck?
     @AppStorage(AIEngineKind.storageKey) private var engine: AIEngineKind = .apple
 
     /// Why the selected AI model can't write cards yet, if anything.
@@ -62,6 +63,11 @@ struct DeckListView: View {
                     ForEach(filteredDecks) { deck in
                         NavigationLink(value: deck) {
                             DeckRow(deck: deck, sort: sort)
+                        }
+                        .contextMenu {
+                            ShareLink(item: SharedDeckFile(deck: deck), preview: SharePreview(deck.title)) {
+                                Label("Share Deck", systemImage: "square.and.arrow.up")
+                            }
                         }
                     }
                     .onDelete(perform: deleteDecks)
@@ -148,6 +154,11 @@ struct DeckListView: View {
             .sheet(item: $incomingNotes) { incoming in
                 NewDeckView(incoming: incoming)
             }
+            .sheet(item: $importingDeck, onDismiss: presentNextSharedDeck) { incoming in
+                ImportSharedDeckView(shared: incoming.deck) { deck in
+                    path = [deck]
+                }
+            }
             .sheet(isPresented: $showingSettings, onDismiss: refreshKeyState) {
                 SettingsView()
             }
@@ -155,6 +166,10 @@ struct DeckListView: View {
                 guard let incoming = router.incomingNotes else { return }
                 router.incomingNotes = nil
                 Task { await present(incoming) }
+            }
+            .onChange(of: router.incomingDecks.count, initial: true) {
+                guard importingDeck == nil else { return }
+                presentNextSharedDeck()
             }
             .onChange(of: router.deckToOpen, initial: true) { _, deckID in
                 guard let deckID else { return }
@@ -189,14 +204,31 @@ struct DeckListView: View {
 
     /// Shows New Deck for a file another app opened in NoteFlash, closing any open sheet first.
     private func present(_ incoming: IncomingNotes) async {
-        if showingNewDeck || showingSettings || incomingNotes != nil {
+        await makeWay()
+        incomingNotes = incoming
+    }
+
+    /// Asks the user about the next shared deck waiting to be added.
+    private func presentNextSharedDeck() {
+        guard let next = router.incomingDecks.first else { return }
+        Task {
+            await makeWay()
+            // The sheet holds the deck from here on, so it leaves the queue now.
+            router.incomingDecks.removeAll { $0.id == next.id }
+            importingDeck = next
+        }
+    }
+
+    /// iOS can't show two sheets at once, so any open one closes first.
+    private func makeWay() async {
+        if showingNewDeck || showingSettings || incomingNotes != nil || importingDeck != nil {
             showingNewDeck = false
             showingSettings = false
             incomingNotes = nil
+            importingDeck = nil
             try? await Task.sleep(for: .milliseconds(600))
         }
         path = []
-        incomingNotes = incoming
     }
 
     private func openDeck(_ id: UUID) {

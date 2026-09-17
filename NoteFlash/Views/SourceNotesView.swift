@@ -13,7 +13,7 @@ struct SourceNotesView: View {
                         .ignoresSafeArea(edges: .bottom)
                 } else if deck.sourceText.isEmpty {
                     ContentUnavailableView("No Notes", systemImage: "doc.text")
-                } else if deck.sourceKind == .text {
+                } else if deck.sourceKind.hasEditableNotes {
                     ScrollView {
                         Text(deck.sourceText)
                             .textSelection(.enabled)

@@ -190,7 +190,7 @@ struct DeckDetailView: View {
                         Text(sourceTitle)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text(deck.sourceKind == .text ? "View notes" : "\(deck.sourceKind.label) · View notes")
+                        Text(deck.sourceKind.hasEditableNotes ? "View notes" : "\(deck.sourceKind.label) · View notes")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -255,7 +255,7 @@ struct DeckDetailView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu("Options", systemImage: "ellipsis") {
                 Button("Add Card", systemImage: "plus") { isAddingCard = true }
-                if deck.sourceKind == .text {
+                if deck.sourceKind.hasEditableNotes {
                     Button("Edit Notes", systemImage: "square.and.pencil") { isEditingNotes = true }
                 }
                 if deck.isLinkedToDrive,
@@ -263,6 +263,9 @@ struct DeckDetailView: View {
                     Link(destination: link) {
                         Label(deck.openLinkLabel, systemImage: "arrow.up.right.square")
                     }
+                }
+                ShareLink(item: SharedDeckFile(deck: deck), preview: SharePreview(deck.title)) {
+                    Label("Share Deck", systemImage: "square.and.arrow.up")
                 }
                 Button("Rename", systemImage: "pencil") {
                     renameText = deck.title

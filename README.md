@@ -22,6 +22,7 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Coverage:** every exam priority gets cards, even in a compact deck.
   - **Marking:** those cards are marked **On the exam**, listed first, and can be studied on their own.
   - **Sync:** adding or editing a comment updates the deck like any other change.
+- **Sharing a deck:** **Share Deck** sends the deck as a single web page file. Anyone can open it — on a phone, a computer, or in email — and study it there or print it; nothing is uploaded and no account is needed. Someone who has NoteFlash can open the same file in the app, which adds the cards exactly as written, exam priorities and notes included, with their own study progress.
 - **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
   - Cards you write or edit by hand are locked and never overwritten.
   - Changed cards get a "New" or "Updated" badge.
@@ -103,6 +104,12 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Priorities:** `PriorityNotes` finds exam priorities in the notes (flagged comments, plus lines with phrases like "will be on the exam").
   - **Card writing:** both engines are told what comments and exam priorities are. Apple Intelligence also runs a short focused pass for each exam priority that's attached to text, adding up to three distinct cards.
   - **Marking:** after generating, regenerating, or updating, cards whose words match a priority (two key words, or the only one) are marked `isPriority`. New cards for priorities go first.
+
+**Sharing a deck.**
+- **One file for both:** `DeckShare` writes a self-contained web page (`DeckSharePage` holds its CSS and script). It shows the cards, a tap-to-flip study card, and the notes, and it prints as a card list. Nothing is loaded from the network, so it works offline, in Quick Look, and in email.
+- **Exactly the same deck:** the deck is also embedded in the page as JSON (`<script type="application/json" id="noteflash-deck">`), so NoteFlash rebuilds it card for card, in order, with exam priorities, the notes, and the card-detail setting. Card text is HTML-escaped, and `<` is escaped in the JSON so nothing in a card can end the element early.
+- **Adding a shared deck:** NoteFlash is registered for HTML files, so a shared file opened or shared into the app shows **Add Shared Deck** (`ImportSharedDeckView`) with the title and a preview. `SharedDeckImporter` then adds it with no AI pass: same cards, fresh study progress, source kind `shared`.
+- **Any other web page** opened in NoteFlash has its text read out of the markup and becomes notes to make cards from.
 
 **Sharing from other apps.**
 - **Handoff:** a share extension can't open its app or run long jobs, so `NoteFlashShare` copies what was shared into an App Group folder (`group.com.ayushkansal.NoteFlash`). The item's manifest is written last, so the app never reads a half-written item.

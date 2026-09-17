@@ -9,6 +9,8 @@ nonisolated enum SourceKind: String, Identifiable, Sendable {
     case googleSlides
     case drivePDF
     case drivePowerPoint
+    /// A deck another NoteFlash user shared.
+    case shared
 
     var id: String { rawValue }
 
@@ -21,8 +23,12 @@ nonisolated enum SourceKind: String, Identifiable, Sendable {
         case .googleSlides: "Google Slides"
         case .drivePDF: "PDF in Google Drive"
         case .drivePowerPoint: "PowerPoint in Google Drive"
+        case .shared: "Shared deck"
         }
     }
+
+    /// Notes the user can edit themselves, rather than a file NoteFlash read them from.
+    var hasEditableNotes: Bool { self == .text || self == .shared }
 
     var systemImage: String {
         switch self {
@@ -31,13 +37,14 @@ nonisolated enum SourceKind: String, Identifiable, Sendable {
         case .powerPoint, .drivePowerPoint: "rectangle.on.rectangle"
         case .googleDoc: "doc.text"
         case .googleSlides: "rectangle.on.rectangle.angled"
+        case .shared: "person.2.fill"
         }
     }
 
     /// The Drive file type for decks linked to Google Drive.
     var driveFileKind: DriveFileKind? {
         switch self {
-        case .text, .pdf, .powerPoint: nil
+        case .text, .pdf, .powerPoint, .shared: nil
         case .googleDoc: .document
         case .googleSlides: .presentation
         case .drivePDF: .pdf
