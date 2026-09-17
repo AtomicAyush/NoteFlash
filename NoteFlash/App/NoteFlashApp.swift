@@ -45,8 +45,8 @@ struct NoteFlashApp: App {
             case .background:
                 syncService.stopForegroundPolling()
                 DocSyncService.scheduleBackgroundRefresh()
-                // Ask iOS for time to finish anything still being written.
-                processing.scheduleCatchUp()
+                // Hands the screen back, and asks iOS for time to finish what's still being written.
+                processing.appDidEnterBackground()
             default:
                 break
             }

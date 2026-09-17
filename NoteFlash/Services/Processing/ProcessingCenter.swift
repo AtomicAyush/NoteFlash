@@ -188,14 +188,14 @@ final class ProcessingCenter {
 
     func dismiss(_ job: ProcessingJob) {
         guard !job.isRunning else { return }
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.resumeNotificationID(job)])
+        clearPausedNotification(for: job)
         jobs.removeAll { $0.id == job.id }
         JobStore.remove(job.id)
     }
 
     func retry(_ job: ProcessingJob) {
         jobs.removeAll { $0.id == job.id }
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [Self.resumeNotificationID(job)])
+        clearPausedNotification(for: job)
         // Sections that already finished are reused, so this picks up where the job stopped.
         job.attempts = 0
         job.errorDetail = nil
@@ -206,6 +206,24 @@ final class ProcessingCenter {
     /// is over), and starts decks for notes shared from other apps.
     func appDidBecomeActive() {
         restoreSavedJobs()
+        updateIdleTimer()
+    }
+
+    /// The app went to the background: the screen is the system's business again.
+    func appDidEnterBackground() {
+        updateIdleTimer()
+        scheduleCatchUp()
+    }
+
+    /// Keeps the screen awake while the app is open and cards are being written, so a job the
+    /// user is watching isn't cut short by the screen locking. Waiting out a usage limit doesn't
+    /// count: that can take minutes with nothing to see.
+    private func updateIdleTimer() {
+        let working = UIApplication.shared.applicationState == .active
+            && jobs.contains { $0.isRunning && $0.waitingUntil == nil }
+        guard UIApplication.shared.isIdleTimerDisabled != working else { return }
+        UIApplication.shared.isIdleTimerDisabled = working
+        log.record(working ? "Keeping the screen on while cards are written" : "The screen can sleep again")
     }
 
     private func resumeReadyJobs() {
@@ -233,6 +251,8 @@ final class ProcessingCenter {
         write(job)
         log.record("Started \(job.activityLabel.lowercased()): \(job.title)")
         requestNotificationPermissionIfNeeded()
+        clearPausedNotification(for: job)
+        updateIdleTimer()
         // iOS only grants continued-processing time to an app the user is looking at. In the
         // background the job runs on whatever time the background task already holds.
         if UIApplication.shared.applicationState == .active, submitSystemTask(for: job) {
@@ -647,6 +667,7 @@ final class ProcessingCenter {
         job.reportedFraction = 1
         job.state = .finished(deckID: deckID, summary: summary)
         JobStore.remove(job.id)
+        clearPausedNotification(for: job)
         log.record("Finished in \(Int(Date.now.timeIntervalSince(job.startedAt)))s: \(job.title) (\(summary))")
         endBackgroundWork(for: job, success: true)
         switch job.kind {
@@ -666,6 +687,7 @@ final class ProcessingCenter {
             job.pausing = false
             write(job)
             scheduleCatchUp()
+            notifyPaused(job)
             return
         }
         if case .rateLimited(let resumeAt, let detail)? = error as? AppleFlashcardEngine.EngineError {
@@ -723,9 +745,38 @@ final class ProcessingCenter {
         "resume-\(job.id.uuidString)"
     }
 
+    private static func pausedNotificationID(_ job: ProcessingJob) -> String {
+        "paused-\(job.id.uuidString)"
+    }
+
+    /// iOS stopped the work, and it needs either background time or the user. Everything written
+    /// so far is saved, so this is an invitation rather than a warning.
+    private func notifyPaused(_ job: ProcessingJob) {
+        guard UIApplication.shared.applicationState != .active else { return }
+        let done = Int(((job.fraction() ?? 0) * 100).rounded())
+        let content = UNMutableNotificationContent()
+        content.title = "“\(job.title)” is paused"
+        content.body = done >= 10
+            ? "\(done)% done and saved. It continues when iOS lets NoteFlash work in the background, or open NoteFlash to finish it now."
+            : "What's written is saved. It continues when iOS lets NoteFlash work in the background, or open NoteFlash to finish it now."
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: Self.pausedNotificationID(job), content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+
+    private func clearPausedNotification(for job: ProcessingJob) {
+        let ids = [Self.pausedNotificationID(job), Self.resumeNotificationID(job)]
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+    }
+
     private func endBackgroundWork(for job: ProcessingJob, success: Bool) {
         if let task = job.systemTask {
             task.expirationHandler = nil
+            if job.pausing {
+                // The Dynamic Island and Lock Screen show this as the task ends.
+                task.updateTitle(job.activityLabel.capitalizedFirstWordOnly, subtitle: "\(job.title) · paused, open NoteFlash to finish")
+            }
             if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
             task.setTaskCompleted(success: success)
             job.systemTask = nil
@@ -749,11 +800,13 @@ final class ProcessingCenter {
                 for job in self.jobs where job.isRunning {
                     self.pushSystemProgress(for: job)
                 }
+                self.updateIdleTimer()
                 if UIApplication.shared.applicationState == .active {
                     self.resumeReadyJobs()
                 }
                 try? await Task.sleep(for: .seconds(2))
             }
+            self?.updateIdleTimer()
             self?.ticker = nil
         }
     }
