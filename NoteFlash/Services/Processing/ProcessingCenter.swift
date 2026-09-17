@@ -227,9 +227,16 @@ final class ProcessingCenter {
     }
 
     private func resumeReadyJobs() {
+        // In the background without a task holding time for us, a job gets about half a minute —
+        // less than a section takes — so it would be cut off and lose that work. Better to wait
+        // for real background time, or for the app to be opened.
+        guard UIApplication.shared.applicationState == .active || isCatchingUp else {
+            if jobs.contains(where: { $0.state == .paused }) { scheduleCatchUp() }
+            return
+        }
         for job in jobs where job.state == .paused && (job.resumeAt ?? .distantPast) <= .now {
             guard job.attempts < Self.maxAttempts else {
-                log.record("Not resuming \(job.title) on its own after \(job.attempts) tries")
+                log.record("Not resuming \(job.title) on its own after \(job.attempts) failed tries")
                 continue
             }
             log.record("Resuming: \(job.title)")
@@ -245,7 +252,6 @@ final class ProcessingCenter {
 
     private func launch(_ job: ProcessingJob) {
         jobs.insert(job, at: 0)
-        job.attempts += 1
         job.state = .running
         job.resumeAt = nil
         write(job)
@@ -265,8 +271,9 @@ final class ProcessingCenter {
 
     // MARK: Work that outlives the app
 
-    /// How many times a job is started on its own before it waits for the user to tap Retry.
-    private static let maxAttempts = 6
+    /// How many times a job may fail on its own before it waits for the user to tap Retry.
+    /// Being stopped by iOS doesn't count: no work was lost, and nothing went wrong.
+    private static let maxAttempts = 4
 
     /// Picks up jobs written down before the app was closed or stopped by iOS, and starts the
     /// ones that are ready. Safe to call whenever the app runs, including a background launch.
@@ -495,13 +502,15 @@ final class ProcessingCenter {
     private static let catchUpLimit: TimeInterval = 25 * 60
     private var catchUp: Task<Void, Never>?
     private var lastCatchUpRequest = Date.distantPast
+    /// True while iOS is letting the app work through the queue in the background.
+    private var isCatchingUp = false
 
     /// Asks iOS to start NoteFlash in the background later to finish what's left. iOS runs these
     /// when the device is idle, and not at all if the app was force-quit from the app switcher.
     func scheduleCatchUp(after date: Date? = nil) {
         guard hasUnfinishedWork else { return }
         // Several jobs stopping at once shouldn't each ask for the same time.
-        guard date != nil || Date.now.timeIntervalSince(lastCatchUpRequest) > 5 else { return }
+        guard date != nil || Date.now.timeIntervalSince(lastCatchUpRequest) > 60 else { return }
         lastCatchUpRequest = .now
         let request = BGProcessingTaskRequest(identifier: BackgroundWork.catchUpTaskID)
         request.earliestBeginDate = date ?? Date(timeIntervalSinceNow: 30)
@@ -539,6 +548,8 @@ final class ProcessingCenter {
     /// Runs the saved jobs iOS gave us time for. Returns when the work is done, the deadline
     /// passes, or iOS takes the time back.
     func catchUp(until deadline: Date) async {
+        isCatchingUp = true
+        defer { isCatchingUp = false }
         restoreSavedJobs()
         guard jobs.contains(where: \.isRunning) else { return }
         log.record("Working in the background (app \(Self.appStateName))")
@@ -705,6 +716,7 @@ final class ProcessingCenter {
         job.errorDetail = detail
         job.state = .failed(error.localizedDescription)
         // Kept so it can be tried again later, unless it's a job that can't succeed on a retry.
+        job.attempts += 1
         if Self.isWorthRetrying(error) && job.attempts < Self.maxAttempts {
             job.state = .paused
             write(job)

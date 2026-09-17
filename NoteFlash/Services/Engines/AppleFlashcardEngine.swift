@@ -1369,7 +1369,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         case .timeout, .stalled: EngineError.timedOut
         case .assetsUnavailable: EngineError.modelNotReady(String(reflecting: error))
         case .cancelled: error
-        case .structuredOutput, .other:
+        case .structuredOutput, .contentCheckFailed, .other:
             // Keep the app's own errors; replace the framework's opaque ones, keeping their details for the log.
             error is EngineError || error is DeckCreator.CreationError
                 ? error : EngineError.generationFailed(String(reflecting: error))
@@ -1393,6 +1393,9 @@ nonisolated enum AppleModelFailure: Equatable {
     case timeout
     /// Guided generation couldn't produce or parse structured output.
     case structuredOutput
+    /// The system's content check faltered (it does this under load); the same request usually
+    /// works a moment later.
+    case contentCheckFailed
     case cancelled
     case other
 
@@ -1452,23 +1455,31 @@ nonisolated enum AppleModelFailure: Equatable {
             self = .assetsUnavailable
             return
         }
+        if Self.involves("SensitiveContentAnalysis", error as NSError) {
+            self = .contentCheckFailed
+            return
+        }
         self = .other
     }
 
     /// Worth retrying as a plain-text request under the permissive guardrails.
     var allowsPlainTextRetry: Bool {
         switch self {
-        case .guardrail, .structuredOutput, .timeout, .stalled, .other: true
+        case .guardrail, .structuredOutput, .timeout, .stalled, .contentCheckFailed, .other: true
         default: false
         }
     }
 
     /// Errors from the system's model manager mean the model itself couldn't be loaded.
     private static func involvesModelManager(_ error: NSError, depth: Int = 0) -> Bool {
-        if error.domain.contains("ModelManager") { return true }
+        involves("ModelManager", error, depth: depth)
+    }
+
+    private static func involves(_ name: String, _ error: NSError, depth: Int = 0) -> Bool {
+        if error.domain.contains(name) { return true }
         guard depth < 4 else { return false }
         var underlying = error.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] ?? []
         if let single = error.userInfo[NSUnderlyingErrorKey] as? NSError { underlying.append(single) }
-        return underlying.contains { involvesModelManager($0, depth: depth + 1) }
+        return underlying.contains { involves(name, $0, depth: depth + 1) }
     }
 }
