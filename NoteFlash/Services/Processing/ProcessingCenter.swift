@@ -607,7 +607,11 @@ final class ProcessingCenter {
         job.task = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await self.perform(job, reporter: reporter)
+                // Sections finished here belong to this job, so resuming it skips them while a
+                // new deck starts from scratch.
+                let result = try await SectionCache.$job.withValue(job.id) {
+                    try await self.perform(job, reporter: reporter)
+                }
                 self.complete(job, deckID: result.deckID, summary: result.summary)
             } catch {
                 self.fail(job, with: error)

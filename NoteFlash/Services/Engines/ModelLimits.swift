@@ -170,6 +170,9 @@ nonisolated enum ModelLimits {
 /// Cards from sections that finished, so a job that is retried, resumed, or picked up after
 /// iOS stopped the app skips work already done (and doesn't spend more of the usage limit on
 /// it). Kept in memory and on disk.
+///
+/// Sections belong to the job that wrote them: a new deck, or a deck being rewritten, asks the
+/// model again rather than handing back cards written for something else.
 nonisolated final class SectionCache: @unchecked Sendable {
     struct Entry: Sendable, Codable {
         let title: String?
@@ -187,8 +190,14 @@ nonisolated final class SectionCache: @unchecked Sendable {
     private let folder = AppGroupStore.folder(named: "FinishedSections")
     private var hasPruned = false
 
-    static func key(model: String, density: CardDensity, request: String, text: String) -> String {
-        let material = [model, density.rawValue, request, text].joined(separator: "\u{1F}")
+    /// The job whose sections may be reused, set for as long as that job runs. Without one there
+    /// is nothing to resume, so nothing is kept.
+    @TaskLocal static var job: UUID?
+
+    /// The key for a section of this job's work, or nil when sections shouldn't be reused at all.
+    static func key(model: String, density: CardDensity, request: String, text: String) -> String? {
+        guard let job else { return nil }
+        let material = [job.uuidString, model, density.rawValue, request, text].joined(separator: "\u{1F}")
         return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 

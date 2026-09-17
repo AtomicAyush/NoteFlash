@@ -318,7 +318,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             try Task.checkCancellation()
             let label: String
             let request: String
-            let key: String
+            let key: String?
             switch part {
             case .typed(let chunk):
                 label = parts.count > 1 ? "Part \(index + 1) of \(parts.count)" : "Writing cards"
@@ -350,7 +350,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 }
             }
             report(0, label)
-            if let cached = SectionCache.shared.entry(for: key) {
+            if let key, let cached = SectionCache.shared.entry(for: key) {
                 if title == nil, let cachedTitle = cached.title, !cachedTitle.isEmpty { title = cachedTitle }
                 cards += cached.cards
                 report(1, label)
@@ -394,7 +394,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 report(1, label)
                 continue
             }
-            if outcome.isComplete {
+            if outcome.isComplete, let key {
                 SectionCache.shared.store(SectionCache.Entry(title: section.title, cards: section.cards), for: key)
             }
             if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -517,7 +517,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             }
             report(0, label)
             let cacheKey = SectionCache.key(model: model, density: density, request: request, text: chunk)
-            if let cached = SectionCache.shared.entry(for: cacheKey) {
+            if let cacheKey, let cached = SectionCache.shared.entry(for: cacheKey) {
                 // Finished before (this job is a retry or a resumed job).
                 if title == nil, let cachedTitle = cached.title, !cachedTitle.isEmpty { title = cachedTitle }
                 cards += cached.cards
@@ -549,7 +549,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     missingFrom: section.cards, in: chunk, density: density, onEvent: { _ in },
                     makeSession: makeSession
                 )
-                if outcome.isComplete {
+                if outcome.isComplete, let cacheKey {
                     SectionCache.shared.store(SectionCache.Entry(title: sectionResult.title, cards: sectionResult.cards), for: cacheKey)
                 }
                 if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
