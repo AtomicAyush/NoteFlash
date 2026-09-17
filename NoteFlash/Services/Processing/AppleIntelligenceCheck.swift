@@ -21,7 +21,12 @@ enum AppleIntelligenceCheck {
         The Calvin cycle occurs in the stroma, where RuBisCO fixes carbon dioxide.
         """
 
+    private static var isRunning = false
+
     static func run() async {
+        guard !isRunning else { return }
+        isRunning = true
+        defer { isRunning = false }
         let log = DiagnosticsLog.shared
         let model = SystemLanguageModel.default
         let system = ProcessInfo.processInfo.operatingSystemVersionString
@@ -61,10 +66,33 @@ enum AppleIntelligenceCheck {
             let reply = try await next.respond(to: "Name one planet.").content
             return "stopped after \(snapshots) snapshots; next request: \(reply)"
         }
+        await probe("two requests at once") {
+            let first = LanguageModelSession(instructions: "You are concise.")
+            let second = LanguageModelSession(instructions: "You are concise.")
+            async let a = first.respond(to: "Name one organelle.")
+            async let b = second.respond(to: "Name one planet.")
+            let (x, y) = try await (a, b)
+            return "\(x.content) / \(y.content)"
+        }
         await probe("full deck") {
             let deck = try await AppleFlashcardEngine().generateDeck(from: .text(notes), density: .balanced, progress: nil)
             return "\(deck.cards.count) cards, title \(deck.title)"
         }
+        #if DEBUG
+        // Debug builds: also make a deck from Documents/selftest-notes.txt, if present.
+        let notesFile = URL.documentsDirectory.appending(path: "selftest-notes.txt")
+        if let custom = try? String(contentsOf: notesFile, encoding: .utf8),
+           !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            await probe("deck from selftest-notes.txt (\(custom.count) chars)") {
+                let steps = ProgressSteps()
+                let deck = try await AppleFlashcardEngine().generateDeck(from: .text(custom), density: .balanced) { progress in
+                    steps.report(progress)
+                }
+                let sample = deck.cards.prefix(3).map { "\($0.front) → \($0.back)" }.joined(separator: "; ")
+                return "\(deck.cards.count) cards, title \(deck.title): \(sample)"
+            }
+        }
+        #endif
         log.record("Check: done")
     }
 
@@ -79,3 +107,23 @@ enum AppleIntelligenceCheck {
         }
     }
 }
+
+#if DEBUG
+/// Logs generation progress in 10% steps.
+private nonisolated final class ProgressSteps: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastStep = -1
+
+    func report(_ progress: GenerationProgress) {
+        let step = Int(progress.fraction * 10)
+        lock.lock()
+        let isNew = step > lastStep
+        if isNew { lastStep = step }
+        lock.unlock()
+        guard isNew else { return }
+        Task { @MainActor in
+            DiagnosticsLog.shared.record("  progress \(step * 10)% — \(progress.detail)")
+        }
+    }
+}
+#endif
