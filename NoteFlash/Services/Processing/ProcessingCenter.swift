@@ -511,21 +511,38 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    // UIKit requires these completion handlers to be called on the main thread; the async
+    // versions of these methods finish on a background thread and crash the app.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let deckID = (response.notification.request.content.userInfo[AppRouter.deckIDKey] as? String)
             .flatMap(UUID.init(uuidString:))
-        await MainActor.run {
-            AppRouter.shared.deckToOpen = deckID
+        nonisolated(unsafe) let completionHandler = completionHandler
+        Self.onMain {
+            if let deckID { AppRouter.shared.deckToOpen = deckID }
+            completionHandler()
         }
     }
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        nonisolated(unsafe) let completionHandler = completionHandler
+        Self.onMain {
+            completionHandler([.banner, .sound])
+        }
+    }
+
+    nonisolated private static func onMain(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(work)
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 }
