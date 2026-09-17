@@ -10,6 +10,19 @@ nonisolated struct SharedDeck: Codable, Sendable {
         var isPriority: Bool = false
     }
 
+    /// The Google Drive file the cards were made from, so a collaborator who can open the same
+    /// file gets a deck that keeps itself up to date instead of a fixed copy.
+    struct Source: Codable, Sendable {
+        var id: String
+        /// A `DriveFileKind` raw value.
+        var kind: String?
+        var name: String?
+        /// A link that opens the file in Docs, Slides, or Drive.
+        var url: String?
+        /// The file version the cards were written from.
+        var version: String?
+    }
+
     /// Marks the payload as a NoteFlash deck rather than any other JSON in the page.
     static let format = "noteflash.deck"
     /// Bumped only for changes older versions can't read.
@@ -24,6 +37,8 @@ nonisolated struct SharedDeck: Codable, Sendable {
     /// The notes the cards came from, for studying, editing, and regenerating.
     var notes: String
     var cards: [Card]
+    /// Set when the sender's deck was linked to a file in Google Drive.
+    var source: Source?
 
     var priorityCount: Int { cards.filter(\.isPriority).count }
 }
@@ -214,7 +229,7 @@ nonisolated enum DeckShare {
             options: [.regularExpression, .caseInsensitive]
         )
         text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        text = decodingEntities(text)
+        text = HTMLText.decodingEntities(text)
         // Collapse the blank lines that stripped markup leaves behind.
         let lines = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -236,17 +251,5 @@ nonisolated enum DeckShare {
             with: "\n",
             options: [.regularExpression, .caseInsensitive]
         )
-    }
-
-    private static func decodingEntities(_ text: String) -> String {
-        var result = text
-        for (entity, character) in [
-            ("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
-            ("&#39;", "'"), ("&apos;", "'"), ("&rsquo;", "’"), ("&lsquo;", "‘"),
-            ("&ldquo;", "“"), ("&rdquo;", "”"), ("&mdash;", "—"), ("&ndash;", "–"), ("&hellip;", "…"),
-        ] {
-            result = result.replacingOccurrences(of: entity, with: character, options: .caseInsensitive)
-        }
-        return result
     }
 }

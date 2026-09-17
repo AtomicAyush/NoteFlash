@@ -143,7 +143,13 @@ final class Deck {
             title: title,
             density: densityRaw,
             notes: sourceText,
-            cards: sortedCards.map { SharedDeck.Card(front: $0.front, back: $0.back, isPriority: $0.isPriority) }
+            cards: sortedCards.map { SharedDeck.Card(front: $0.front, back: $0.back, isPriority: $0.isPriority) },
+            source: googleDocID.map {
+                SharedDeck.Source(
+                    id: $0, kind: sourceKind.driveFileKind?.rawValue, name: sourceName,
+                    url: googleDocURL, version: sourceVersion
+                )
+            }
         )
     }
 

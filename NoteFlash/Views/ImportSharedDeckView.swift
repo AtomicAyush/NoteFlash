@@ -8,8 +8,16 @@ struct ImportSharedDeckView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(GoogleAuth.self) private var googleAuth
     @State private var title: String
     @State private var errorMessage: String?
+    @State private var linkToSource = true
+    @State private var access = SourceAccess.unchecked
+
+    /// Whether the recipient can open the Google Drive file the cards were made from.
+    private enum SourceAccess: Equatable {
+        case unchecked, checking, canOpen(String?), cannotOpen(String)
+    }
 
     private let previewCount = 8
 
@@ -53,6 +61,13 @@ struct ImportSharedDeckView: View {
                 } header: {
                     Text("Cards")
                 }
+
+                if let source = shared.source {
+                    sourceSection(source)
+                }
+            }
+            .task {
+                if let source = shared.source { await checkAccess(to: source) }
             }
             .navigationTitle("Add Shared Deck")
             .navigationBarTitleDisplayMode(.inline)
@@ -83,9 +98,74 @@ struct ImportSharedDeckView: View {
         return Text("\(cards)\(priorities)\(notes)")
     }
 
-    private func add() {
+    /// Offers to link the new deck to the same Google Drive file, when the notes came from one.
+    @ViewBuilder
+    private func sourceSection(_ source: SharedDeck.Source) -> some View {
+        let label = DriveFileKind(rawValue: source.kind ?? "")?.label ?? "Google Drive file"
+        Section {
+            switch access {
+            case .unchecked, .checking:
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Checking whether you can open \(source.name ?? label)…")
+                        .foregroundStyle(.secondary)
+                }
+            case .canOpen(let name):
+                Toggle(isOn: $linkToSource) {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Keep in sync with the \(label)")
+                            Text(name ?? source.name ?? label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    } icon: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                }
+            case .cannotOpen(let reason):
+                Label(reason, systemImage: "link.badge.plus")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Source")
+        } footer: {
+            if case .canOpen = access {
+                Text(existingDeck == nil
+                    ? "Your copy updates when the \(label) changes, the same as the sender's."
+                    : "You already have a deck linked to this \(label) (“\(existingDeck?.title ?? "")”). Adding this makes a second one.")
+            }
+        }
+    }
+
+    private var existingDeck: Deck? {
+        shared.source.flatMap { SharedDeckImporter.deck(linkedTo: $0, in: modelContext) }
+    }
+
+    /// Looks the file up with the recipient's own account: a collaborator can open it, anyone
+    /// else gets the cards without syncing.
+    private func checkAccess(to source: SharedDeck.Source) async {
+        guard googleAuth.isSignedIn else {
+            access = .cannotOpen("These cards came from a \(DriveFileKind(rawValue: source.kind ?? "")?.label ?? "Google Drive file"). Sign in with Google in Settings to keep your copy in sync with it.")
+            return
+        }
+        access = .checking
         do {
-            let deck = try SharedDeckImporter.addDeck(shared, title: title, to: modelContext)
+            let token = try await googleAuth.validAccessToken()
+            let file = try await GoogleDriveClient.metadata(accessToken: token, id: source.id)
+            access = .canOpen(file.name)
+        } catch {
+            access = .cannotOpen("You don't have access to the \(DriveFileKind(rawValue: source.kind ?? "")?.label ?? "file") these cards came from, so they're added as a copy.")
+        }
+    }
+
+    private func add() {
+        var linking = false
+        if case .canOpen = access { linking = linkToSource }
+        do {
+            let deck = try SharedDeckImporter.addDeck(shared, title: title, linkingToSource: linking, to: modelContext)
             dismiss()
             onAdded(deck)
         } catch {

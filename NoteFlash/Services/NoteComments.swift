@@ -17,7 +17,7 @@ nonisolated enum CommentWeaver {
     static let priorityLabel = "EXAM PRIORITY"
 
     static func weave(_ comments: [DriveComment], into text: String) -> String {
-        let usable = comments.filter { !clean($0.content).isEmpty || $0.replies.contains { !clean($0).isEmpty } }
+        let usable = comments.filter(isUsable)
         guard !usable.isEmpty else { return text }
 
         var lines = text.components(separatedBy: "\n")
@@ -27,7 +27,9 @@ nonisolated enum CommentWeaver {
         for comment in usable {
             if let index = lineIndex(for: comment.quote, in: keys) {
                 attached[index, default: []].append(line(for: comment, anchored: true))
-            } else {
+            } else if namesSomething(comment) {
+                // Away from the text it was on, a comment is only worth keeping if it says what
+                // it's about: "On Exam" on its own names nothing to study.
                 unattached.append(line(for: comment, anchored: false))
             }
         }
@@ -39,6 +41,24 @@ nonisolated enum CommentWeaver {
             result += "\n\n## Comments\n" + unattached.joined(separator: "\n")
         }
         return result
+    }
+
+    /// A comment with something to say: some words, and — when it isn't attached to any text —
+    /// something to study rather than only a note about the exam.
+    static func isUsable(_ comment: DriveComment) -> Bool {
+        guard !words(of: comment).isEmpty else { return false }
+        return comment.quote.map(clean)?.isEmpty == false || namesSomething(comment)
+    }
+
+    /// Two words of substance, so "On Exam" and "Assume on exam" don't count but "Midterm covers
+    /// everything through Yorktown" does.
+    static func namesSomething(_ comment: DriveComment) -> Bool {
+        CardMatcher.keywords(in: words(of: comment).joined(separator: " "))
+            .subtracting(PriorityNotes.signalWords).count >= 2
+    }
+
+    private static func words(of comment: DriveComment) -> [String] {
+        ([comment.content] + comment.replies).map(clean).filter { !$0.isEmpty }
     }
 
     static func line(for comment: DriveComment, anchored: Bool) -> String {
@@ -142,8 +162,9 @@ nonisolated struct PriorityItem: Sendable, Equatable {
 /// Finds exam priorities in notes and decides which cards cover them.
 nonisolated enum PriorityNotes {
     /// Words that say "exam" rather than what the point is about.
-    private static let signalWords: Set<String> = [
+    static let signalWords: Set<String> = [
         "exam", "test", "tested", "quiz", "midterm", "final", "question", "know", "memorize", "study",
+        "assume", "assumed",
         "important", "definitely", "remember", "priority", "comment", "will", "sure", "going", "learn",
         "highyield", "high", "yield", "testable", "material", "topic", "content", "item", "replie",
         "these", "those", "next", "every", "each", "well", "really", "pay", "attention", "focus", "review",

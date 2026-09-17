@@ -192,8 +192,10 @@ nonisolated enum CardWriting {
         var seen = existing
         var result: [GeneratedCard] = []
         for card in cards {
-            let back = removingMarkers(card.back)
-            let front = askingForDate(removingMarkers(card.front), answer: back)
+            // Only the answer has the aside removed: a question that is about the exam rather than
+            // the subject ("What will be on the exam?") should be dropped, not patched up.
+            let back = tidied(removingExamAside(removingMarkers(card.back)))
+            let front = tidied(askingForDate(removingMarkers(card.front), answer: back))
             let frontKey = normalizedKey(front)
             let backKey = normalizedKey(back)
             guard !frontKey.isEmpty, !backKey.isEmpty, !front.hasPrefix("#") else { continue }
@@ -212,6 +214,34 @@ nonisolated enum CardWriting {
         "on the slide", "in the slides", "the speaker", "the presenter", "was mentioned", "were mentioned",
         "is mentioned", "are mentioned",
     ]
+
+    /// Notes about the exam that a comment added ("… , on the exam"). The fact stays; the aside
+    /// belongs on the card's flag, not in its answer.
+    private static let examAsides = [
+        "exam priority", "on the exam", "on exam", "on the test", "on the quiz", "on the midterm",
+        "on the final", "key definition", "key defenition", "tested in ps", "assume on exam",
+    ]
+
+    static func removingExamAside(_ text: String) -> String {
+        var result = text
+        for aside in examAsides {
+            // With whatever punctuation joined it to the sentence, wherever it sits.
+            result = result.replacingOccurrences(
+                of: "[,;:(\\-–—]?\\s*\\b\(NSRegularExpression.escapedPattern(for: aside))\\b\\s*[,;:)\\.]?",
+                with: " ",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return result
+    }
+
+    /// Tidies the punctuation and spacing that stripping leaves behind ("ground clutter ?").
+    static func tidied(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+([,;:.!?])", with: "$1", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ",;:-–— "))
+    }
 
     /// Strips comment and priority markers the model sometimes copies into a card.
     static func removingMarkers(_ text: String) -> String {

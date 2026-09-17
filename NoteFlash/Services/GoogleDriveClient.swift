@@ -388,10 +388,12 @@ nonisolated enum GoogleDriveClient {
             let data = try await get(path: "files/\(id)/comments", queryItems: items, accessToken: accessToken)
             let page = try JSONDecoder().decode(CommentList.self, from: data)
             comments += (page.comments ?? []).filter { $0.deleted != true }.map { comment in
+                // Google returns this text with HTML escapes still in it.
                 DriveComment(
-                    quote: comment.quotedFileContent?.value,
-                    content: comment.content ?? "",
-                    replies: (comment.replies ?? []).filter { $0.deleted != true }.compactMap(\.content),
+                    quote: comment.quotedFileContent?.value.map(HTMLText.decodingEntities),
+                    content: HTMLText.decodingEntities(comment.content ?? ""),
+                    replies: (comment.replies ?? []).filter { $0.deleted != true }
+                        .compactMap(\.content).map(HTMLText.decodingEntities),
                     modified: parseDate(comment.modifiedTime)
                 )
             }

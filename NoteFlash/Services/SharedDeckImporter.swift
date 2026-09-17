@@ -6,18 +6,41 @@ import UniformTypeIdentifiers
 /// Adds a deck someone shared, exactly as they wrote it: the same cards in the same order, with
 /// their exam priorities. No AI pass, so it's instant and nothing is reworded.
 enum SharedDeckImporter {
-    static func addDeck(_ shared: SharedDeck, title: String? = nil, to context: ModelContext) throws -> Deck {
+    /// With `linkingToSource`, a deck made from a Google Drive file the recipient can open too
+    /// is linked to that file, so their copy updates when the file changes instead of going stale.
+    static func addDeck(
+        _ shared: SharedDeck,
+        title: String? = nil,
+        linkingToSource: Bool = false,
+        to context: ModelContext
+    ) throws -> Deck {
         let chosen = (title ?? shared.title).trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = linkingToSource ? shared.source : nil
         let deck = Deck(
             title: chosen.isEmpty ? "Shared deck" : chosen,
-            sourceKind: .shared,
+            sourceKind: source.map { DriveFileKind(rawValue: $0.kind ?? "")?.sourceKind ?? .shared } ?? .shared,
+            sourceName: source?.name,
             sourceText: shared.notes,
             density: CardDensity(rawValue: shared.density) ?? .balanced
         )
+        if let source {
+            deck.googleDocID = source.id
+            deck.googleDocURL = source.url
+            deck.sourceVersion = source.version
+            deck.sourceHash = TextDiff.fingerprint(of: shared.notes)
+            deck.autoSync = true
+        }
         context.insert(deck)
         deck.addSharedCards(shared.cards)
         try context.save()
         return deck
+    }
+
+    /// A deck already linked to this file, so the same doc isn't added twice.
+    static func deck(linkedTo source: SharedDeck.Source, in context: ModelContext) -> Deck? {
+        let id = source.id
+        let descriptor = FetchDescriptor<Deck>(predicate: #Predicate { $0.googleDocID == id })
+        return try? context.fetch(descriptor).first
     }
 }
 
