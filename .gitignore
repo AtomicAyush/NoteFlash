@@ -19,3 +19,6 @@ xcuserdata/
 
 # Local secrets
 *.local.xcconfig
+
+# Downloaded Google OAuth client config (the app reads AppConfig.googleClientID instead)
+client_*.apps.googleusercontent.com.plist

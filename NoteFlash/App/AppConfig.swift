@@ -4,7 +4,7 @@ nonisolated enum AppConfig {
     /// iOS OAuth client ID from Google Cloud Console, e.g.
     /// "1234567890-abc123.apps.googleusercontent.com". See README.md → "Google Docs setup".
     /// Leave empty to only support Google Docs shared as "Anyone with the link".
-    static let googleClientID = ""
+    static let googleClientID = "437168323267-gnjetmgmkqjc12mujvi8qmc51ns6e48m.apps.googleusercontent.com"
 
     /// Claude model used when "Claude" is the selected AI engine in Settings.
     static let claudeModel = "claude-opus-5"
