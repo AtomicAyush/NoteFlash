@@ -154,6 +154,49 @@ nonisolated enum CardMatcher {
         return fromRemoved >= fromNotes + 2
     }
 
+    /// True when some line of the notes contains both the answer and the question's topic.
+    static func isSupported(front: String, back: String, byLines lines: [Set<String>]) -> Bool {
+        let answerWords = keywords(in: back)
+        let topicWords = keywords(in: front).subtracting(answerWords)
+        guard !answerWords.isEmpty else { return true }
+        // Numbers must match exactly: "100,000" isn't supported by a line saying "500,000".
+        let numbers = answerWords.filter { $0.contains(where: \.isNumber) }
+        let needed = min(2, topicWords.count)
+        return lines.contains { line in
+            !line.isDisjoint(with: answerWords)
+                && numbers.isSubset(of: line)
+                && line.intersection(topicWords).count >= needed
+        }
+    }
+
+    /// True when the answer has a number that was deleted from the notes and appears nowhere in
+    /// them now, like "100,000" after the notes changed it to "500,000".
+    static func hasOutdatedNumber(_ answer: String, removedWords: Set<String>, noteWords: Set<String>) -> Bool {
+        keywords(in: answer).contains { word in
+            word.contains(where: \.isNumber) && removedWords.contains(word) && !noteWords.contains(word)
+        }
+    }
+
+    /// Lines with facts to write cards about: not headings, continuation labels, or comments.
+    static func contentLines(of text: String) -> [String] {
+        TextDiff.lines(of: text).filter { !isContextLine($0) && !keywords(in: $0).isEmpty }
+    }
+
+    static func isContextLine(_ line: String) -> Bool {
+        line.hasPrefix("#") || line.hasPrefix("(Continuing") || CommentWeaver.isCommentLine(line)
+    }
+
+    /// Lines of the notes that no card is about. A card is about a line when it shares three of
+    /// the line's key words (or half of a short line's).
+    static func uncoveredLines(in text: String, by cards: [GeneratedCard]) -> [String] {
+        let cardWords = cards.map { keywords(in: $0.front + " " + $0.back) }
+        return contentLines(of: text).filter { line in
+            let lineWords = keywords(in: line)
+            let needed = min(3, (lineWords.count + 1) / 2)
+            return !cardWords.contains { $0.intersection(lineWords).count >= needed }
+        }
+    }
+
     /// True when two cards test essentially the same material.
     static func isNearDuplicate(_ a: GeneratedCard, of b: GeneratedCard) -> Bool {
         let wordsA = keywords(in: a.front + " " + a.back)
@@ -161,5 +204,30 @@ nonisolated enum CardMatcher {
         guard !wordsA.isEmpty, !wordsB.isEmpty else { return false }
         let jaccard = Double(wordsA.intersection(wordsB).count) / Double(wordsA.union(wordsB).count)
         return jaccard >= 0.6
+    }
+}
+
+/// Notices a response that keeps writing cards it already wrote, as the small on-device model
+/// sometimes does, so it can be stopped instead of running on to its card limit.
+nonisolated struct RepetitionWatch {
+    static let limit = 4
+    private var checked = 0
+    private var kept: [GeneratedCard] = []
+    private(set) var repeats = 0
+
+    /// Looks at the cards finished since the last call (the last card may still be streaming).
+    /// True once the response has repeated itself `limit` times.
+    mutating func isLooping(_ cards: [GeneratedCard]) -> Bool {
+        let finished = cards.dropLast()
+        for card in finished.dropFirst(checked) {
+            let front = CardWriting.normalizedKey(card.front)
+            if kept.contains(where: { CardWriting.normalizedKey($0.front) == front || CardMatcher.isNearDuplicate(card, of: $0) }) {
+                repeats += 1
+            } else {
+                kept.append(card)
+            }
+        }
+        checked = max(checked, finished.count)
+        return repeats >= Self.limit
     }
 }

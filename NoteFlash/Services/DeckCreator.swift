@@ -202,12 +202,7 @@ enum DeckCreator {
     private static func insert(_ deck: Deck, cards: [GeneratedCard], into context: ModelContext) throws -> Deck {
         guard !cards.isEmpty else { throw CreationError.noCards }
         context.insert(deck)
-        for card in cards {
-            deck.addCard(
-                front: card.front.trimmingCharacters(in: .whitespacesAndNewlines),
-                back: card.back.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
+        deck.addGeneratedCards(cards)
         try context.save()
         return deck
     }

@@ -17,6 +17,8 @@ final class Flashcard {
     var isStarred: Bool = false
     /// Set when the user edits or writes a card by hand; syncs never overwrite these.
     var isUserEdited: Bool = false
+    /// Covers a point the notes (or their comments) say will be on the exam.
+    var isPriority: Bool = false
 
     var syncBadgeRaw: String?
     var syncBadgeDate: Date?

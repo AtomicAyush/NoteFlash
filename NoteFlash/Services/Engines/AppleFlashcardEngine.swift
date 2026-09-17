@@ -136,6 +136,12 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
 
     private static let options = GenerationOptions(temperature: 0.3)
 
+    /// A generous length cap for a set of `cap` cards (each card, with its fact and JSON, runs
+    /// about 70 to 100 tokens). The card-count cap stops runaway responses first.
+    private static func cardSetTokenLimit(cap: Int) -> Int {
+        min(5_000, 400 + cap * 130)
+    }
+
     /// Caps a response's length, so a model that starts repeating itself stops early instead of
     /// using up the time and usage limit.
     private static func options(maxTokens: Int) -> GenerationOptions {
@@ -348,10 +354,15 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             do {
                 switch part {
                 case .typed(let chunk):
-                    section = try await sectionCards(
+                    var typed = try await sectionCards(
                         for: chunk, request: request, density: density, outcome: outcome, onEvent: onEvent,
                         makeSession: { Self.onDeviceSession(Self.generationInstructions(density: density)) }
                     )
+                    typed.cards += try await priorityCards(
+                        missingFrom: typed.cards, in: chunk, density: density, onEvent: onEvent,
+                        makeSession: { Self.onDeviceSession(Self.generationInstructions(density: density)) }
+                    )
+                    section = typed
                 case .page(let page):
                     do {
                         section = try await pageCards(page, in: document, request: request, density: density, outcome: outcome, onEvent: onEvent)
@@ -414,7 +425,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         }
         let hint = page.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let cap = hint.isEmpty ? 16 : max(8, Self.maximumCardCount(for: hint, density: density))
-        let options = Self.options(maxTokens: min(4_000, 300 + cap * 75))
+        let options = Self.options(maxTokens: Self.cardSetTokenLimit(cap: cap))
         let instructions = Self.generationInstructions(density: density)
         let prompt: Prompt = hint.isEmpty
             ? Prompt {
@@ -523,13 +534,18 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     },
                     makeSession: makeSession
                 )
+                var sectionResult = section
+                sectionResult.cards += try await priorityCards(
+                    missingFrom: section.cards, in: chunk, density: density, onEvent: { _ in },
+                    makeSession: makeSession
+                )
                 if outcome.isComplete {
-                    SectionCache.shared.store(SectionCache.Entry(title: section.title, cards: section.cards), for: cacheKey)
+                    SectionCache.shared.store(SectionCache.Entry(title: sectionResult.title, cards: sectionResult.cards), for: cacheKey)
                 }
                 if title == nil, let sectionTitle = section.title, !sectionTitle.trimmingCharacters(in: .whitespaces).isEmpty {
                     title = sectionTitle
                 }
-                cards += section.cards
+                cards += sectionResult.cards
             } catch where AppleModelFailure(error) == .guardrail {
                 // Skip a section the safety filter rejects rather than failing the whole deck.
                 blockedSections += 1
@@ -551,11 +567,13 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
 
     /// Cards for one section of notes. Guided generation always applies Apple's default
     /// guardrails and often refuses ordinary notes about wars, disease, and the like, so a
-    /// refused section is retried as plain text under the permissive guardrails.
+    /// refused section is retried as plain text under the permissive guardrails. With
+    /// `coversEveryLine`, lines the cards miss get a second pass.
     private func sectionCards(
         for text: String,
         request: String,
         density: CardDensity,
+        coversEveryLine: Bool = true,
         outcome: SectionOutcome = SectionOutcome(),
         onEvent: (SectionEvent) -> Void,
         makeSession: () -> LanguageModelSession
@@ -564,31 +582,38 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         let cap = Self.maximumCardCount(for: text, density: density)
         do {
             let sets = try await cardSets(for: text, request: request, cap: cap, outcome: outcome, onEvent: onEvent, makeSession: makeSession)
-            var cards = Self.faithful(sets.flatMap(\.cards).map(\.card), to: text)
-            // The model sometimes stops early; top up a thin section with a plain-text pass,
-            // unless the usage limit was hit recently (the extra pass is optional).
-            if cards.count < Self.minimumCardCount(for: text, density: density), !ModelLimits.wasLimitedRecently {
+            var cards = CardWriting.cleaned(Self.faithful(sets.flatMap(\.cards).map(\.card), to: text))
+            // The model sometimes stops early or loops on the first facts; write cards for the
+            // lines nothing covers yet, unless the usage limit was hit recently (the extra pass
+            // is optional).
+            let uncovered = CardMatcher.uncoveredLines(in: text, by: cards)
+            if coversEveryLine, !ModelLimits.wasLimitedRecently,
+               Self.needsTopUp(cardCount: cards.count, uncovered: uncovered.count, in: text, density: density) {
+                let excerpt = Self.excerpt(of: text, keeping: uncovered)
                 let found = cards.count
                 let extra = (try? await plainTextCards(
-                    for: text, request: request, instructions: instructions, cap: cap, outcome: outcome,
+                    for: excerpt, request: request, instructions: instructions,
+                    cap: Self.maximumCardCount(for: excerpt, density: density), outcome: outcome,
                     onEvent: { event in
                         if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                     }
                 )) ?? []
-                cards += Self.faithful(extra, to: text)
-                    .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
+                cards = Self.merging(Self.faithful(extra, to: text), into: cards)
             }
             return SectionCards(title: sets.first?.title, cards: Array(cards.prefix(cap)))
         } catch where AppleModelFailure(error).allowsPlainTextRetry {
             var cards: [GeneratedCard] = []
             var plainTextError: Error?
-            for _ in 0..<2 where cards.count < Self.minimumCardCount(for: text, density: density) {
+            var passText = text
+            // A second pass covers only the lines the first one missed.
+            for _ in 0..<2 {
                 try Task.checkCancellation()
                 let found = cards.count
                 let extra: [GeneratedCard]
                 do {
                     extra = try await plainTextCards(
-                        for: text, request: request, instructions: instructions, cap: cap, outcome: outcome,
+                        for: passText, request: request, instructions: instructions,
+                        cap: Self.maximumCardCount(for: passText, density: density), outcome: outcome,
                         onEvent: { event in
                             if case .cards(let count) = event { onEvent(.cards(found + count)) } else { onEvent(event) }
                         }
@@ -597,8 +622,11 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     plainTextError = error
                     break
                 }
-                cards += Self.faithful(extra, to: text)
-                    .filter { new in !cards.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
+                cards = Self.merging(Self.faithful(extra, to: text), into: cards)
+                let uncovered = CardMatcher.uncoveredLines(in: text, by: cards)
+                guard coversEveryLine,
+                      Self.needsTopUp(cardCount: cards.count, uncovered: uncovered.count, in: text, density: density) else { break }
+                passText = Self.excerpt(of: text, keeping: uncovered)
             }
             // A refusal is the more useful error; otherwise report why plain text failed too.
             guard !cards.isEmpty else {
@@ -606,6 +634,49 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             }
             return SectionCards(title: nil, cards: Array(cards.prefix(cap)))
         }
+    }
+
+    /// Extra cards for the exam priorities in `text`, so every point the student was told will
+    /// be on the exam gets thorough coverage (skipping near-duplicates of `cards`).
+    private func priorityCards(
+        missingFrom cards: [GeneratedCard],
+        in text: String,
+        density: CardDensity,
+        onEvent: (SectionEvent) -> Void,
+        makeSession: () -> LanguageModelSession
+    ) async throws -> [GeneratedCard] {
+        // Comments attached to no text name no specific point to write about.
+        let items = PriorityNotes.items(in: text).filter(\.isAnchored)
+        guard !items.isEmpty else { return [] }
+        var written = cards
+        var added: [GeneratedCard] = []
+        for item in items.prefix(8) {
+            try Task.checkCancellation()
+            // Exam points get their own pass even when already covered: one quick card isn't
+            // enough for something the student will be tested on.
+            let covered = written.contains { PriorityNotes.isPriority(front: $0.front, back: $0.back, items: [item]) }
+            let context = PriorityNotes.context(for: item, in: text)
+            let request = "The student was told this point will be on the exam: “\(CommentWeaver.clean(item.topic))”. Write 1 to 3 flashcards that test it thoroughly from different angles, using these notes. Each answer must be the specific fact the question asks for."
+            do {
+                let section = try await sectionCards(
+                    for: context, request: request, density: density, coversEveryLine: false,
+                    onEvent: { event in if case .waiting = event { onEvent(event) } },
+                    makeSession: makeSession
+                )
+                let fresh = Array(
+                    section.cards
+                        .filter { new in !written.contains { CardMatcher.isNearDuplicate(new, of: $0) } }
+                        .prefix(covered ? 2 : 3)
+                )
+                added += fresh
+                written += fresh
+            } catch where AppleModelFailure(error) == .rateLimited || AppleModelFailure(error) == .cancelled {
+                throw error
+            } catch {
+                // Keep going; the deck still has the section's other cards.
+            }
+        }
+        return added
     }
 
     private static func sentenceCount(in text: String) -> Int {
@@ -642,6 +713,50 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         max(4, estimatedCardCount(for: text, density: density) * 2)
     }
 
+    /// Whether a section's cards leave enough of it uncovered to be worth a second pass over the
+    /// missed lines.
+    private static func needsTopUp(cardCount: Int, uncovered: Int, in text: String, density: CardDensity) -> Bool {
+        guard uncovered > 0 else { return false }
+        if cardCount < minimumCardCount(for: text, density: density) { return true }
+        // Compact decks skip minor facts on purpose.
+        guard density != .essentials else { return false }
+        return uncovered >= max(2, CardMatcher.contentLines(of: text).count / 8)
+    }
+
+    /// The given lines of `text`, each under the heading it appeared under and with any comment
+    /// on it.
+    private static func excerpt(of text: String, keeping lines: [String]) -> String {
+        let kept = Set(lines)
+        var result: [String] = []
+        var heading: String?
+        var wasKept = false
+        for line in TextDiff.lines(of: text) {
+            if line.hasPrefix("#") || line.hasPrefix("(Continuing") {
+                heading = line
+                wasKept = false
+            } else if kept.contains(line) {
+                if let current = heading {
+                    result.append(current)
+                    heading = nil
+                }
+                result.append(line)
+                wasKept = true
+            } else if wasKept, CommentWeaver.isCommentLine(line) {
+                result.append(line)
+            } else {
+                wasKept = false
+            }
+        }
+        return result.joined(separator: "\n")
+    }
+
+    /// `cards` plus the cards in `new` that don't repeat them.
+    private static func merging(_ new: [GeneratedCard], into cards: [GeneratedCard]) -> [GeneratedCard] {
+        let fronts = Set(cards.map { CardWriting.normalizedKey($0.front) })
+        return cards + CardWriting.cleaned(new, excludingFronts: fronts)
+            .filter { card in !cards.contains { CardMatcher.isNearDuplicate(card, of: $0) } }
+    }
+
     /// Drops cards whose answer shares no key words with the notes, which catches invented facts.
     private static func faithful(_ cards: [GeneratedCard], to notes: String) -> [GeneratedCard] {
         let noteWords = CardMatcher.keywords(in: notes)
@@ -674,9 +789,10 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                         """
                 )
                 let prompt = "\(request)\n\nNOTES:\n\(text)"
-                let options = Self.options(maxTokens: min(3_000, 200 + cap * 50))
+                let options = Self.options(maxTokens: min(4_000, 300 + cap * 90))
                 var latest = ""
                 var end = ModelLimits.StreamEnd.finished
+                var repetition = RepetitionWatch()
                 do {
                     (_, end) = try await ModelLimits.watch(
                         produce: { box in
@@ -689,7 +805,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                             latest = content
                             let count = Self.answerCount(in: content)
                             onEvent(.cards(count))
-                            if count > cap { stop() }
+                            if count > cap || repetition.isLooping(Self.parsePlainTextCards(content)) { stop() }
                         }
                     )
                 } catch where !(error is CancellationError) && !Self.parsePlainTextCards(latest).isEmpty {
@@ -772,7 +888,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         do {
             return try await ModelLimits.run(onWait: { onEvent(.waiting($0)) }) {
                 let session = makeSession()
-                let options = Self.options(maxTokens: min(4_000, 300 + cap * 75))
+                let options = Self.options(maxTokens: Self.cardSetTokenLimit(cap: cap))
                 return [try await Self.streamCardSet(cap: cap, outcome: outcome, onEvent: onEvent) {
                     session.streamResponse(to: prompt, generating: AppleCardSet.self, options: options)
                 }]
@@ -805,6 +921,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
     ) async throws -> AppleCardSet {
         var latest: AppleCardSet.PartiallyGenerated?
         var end = ModelLimits.StreamEnd.finished
+        var repetition = RepetitionWatch()
         do {
             (_, end) = try await ModelLimits.watch(
                 produce: { box in
@@ -818,7 +935,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                     let count = content.cards?.count ?? 0
                     onEvent(.cards(count))
                     // Stop a runaway response; the cards written so far are kept below.
-                    if count > cap { stop() }
+                    if count > cap || repetition.isLooping(completeCards(in: content).map(\.card)) { stop() }
                 }
             )
         } catch where !(error is CancellationError) && !completeCards(in: latest).isEmpty {
@@ -883,6 +1000,9 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         let editable = existing.filter { !$0.locked }
         let noteLines = TextDiff.lines(of: updatedNotes)
         let noteWords = CardMatcher.keywords(in: updatedNotes)
+        let noteLineWords = noteLines
+            .filter { !$0.hasPrefix("#") && !CommentWeaver.isCommentLine($0) }
+            .map(CardMatcher.keywords(in:))
         var revision = DeckRevision(updated: [], removed: [], added: [])
         // The small model does best with one contiguous edit at a time.
         let hunks = changes.hunks
@@ -899,7 +1019,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 }
                 report(0, label)
                 do {
-                    try await review(hunk, cards: editable, noteWords: noteWords, into: &revision)
+                    try await review(hunk, cards: editable, noteWords: noteWords, noteLines: noteLineWords, into: &revision)
                 } catch where AppleModelFailure(error) == .guardrail {
                     revision.skippedSections += 1
                 }
@@ -932,15 +1052,14 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         let removedLines = hunks.flatMap(\.removed).filter { !$0.hasPrefix("#") }
         let removedWords = CardMatcher.keywords(in: removedLines.joined(separator: " "))
         let removedLineWords = removedLines.map(CardMatcher.keywords(in:))
-        let noteLineWords = noteLines.filter { !$0.hasPrefix("#") }.map(CardMatcher.keywords(in:))
         let handled = Set(revision.removed).union(revision.updated.map(\.id))
         for card in editable where !handled.contains(card.id) {
             let answerWords = CardMatcher.keywords(in: card.back)
             let answerGone = !answerWords.isDisjoint(with: removedWords)
                 && CardMatcher.isAnswerMissing(card.back, fromNoteWords: noteWords)
-            if answerGone || CardMatcher.isSourcedFromRemovedText(
-                card, removedLines: removedLineWords, noteLines: noteLineWords
-            ) {
+            if answerGone
+                || CardMatcher.hasOutdatedNumber(card.back, removedWords: removedWords, noteWords: noteWords)
+                || CardMatcher.isSourcedFromRemovedText(card, removedLines: removedLineWords, noteLines: noteLineWords) {
                 revision.removed.append(card.id)
             }
         }
@@ -968,6 +1087,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         _ hunk: TextDiff.Hunk,
         cards: [ExistingCard],
         noteWords: Set<String>,
+        noteLines: [Set<String>],
         into revision: inout DeckRevision
     ) async throws {
         guard !hunk.removed.isEmpty else { return }
@@ -977,7 +1097,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             let batch = related[start..<min(start + Self.reviewBatchSize, related.count)]
                 .filter { card in !revision.removed.contains(card.id) && !revision.updated.contains { $0.id == card.id } }
             guard !batch.isEmpty else { continue }
-            try await review(hunk, batch: Array(batch), noteWords: noteWords, into: &revision)
+            try await review(hunk, batch: Array(batch), noteWords: noteWords, noteLines: noteLines, into: &revision)
         }
     }
 
@@ -985,6 +1105,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         _ hunk: TextDiff.Hunk,
         batch related: [ExistingCard],
         noteWords: Set<String>,
+        noteLines: [Set<String>],
         depth: Int = 0,
         into revision: inout DeckRevision
     ) async throws {
@@ -995,7 +1116,7 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
             let pieces = hunk.split(maxCharacters: max(200, hunk.characterCount / 2))
             guard pieces.count > 1 else { throw error }
             for piece in pieces {
-                try await review(piece, batch: related, noteWords: noteWords, depth: depth + 1, into: &revision)
+                try await review(piece, batch: related, noteWords: noteWords, noteLines: noteLines, depth: depth + 1, into: &revision)
             }
             return
         }
@@ -1021,10 +1142,14 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
                 && (CardWriting.normalizedKey(front) != CardWriting.normalizedKey(card.front)
                     || CardWriting.normalizedKey(back) != CardWriting.normalizedKey(card.back))
                 && !CardMatcher.isAnswerMissing(back, fromNoteWords: noteWords)
+                // The corrected card must match one line of the notes, not words scattered across them.
+                && CardMatcher.isSupported(front: front, back: back, byLines: noteLines)
                 && !Self.isBloated(back, comparedTo: card.back)
+            // Keep a card the model wants removed if its fact is still in the notes.
+            let stillSupported = CardMatcher.isSupported(front: card.front, back: card.back, byLines: noteLines)
             if isRealUpdate {
                 revision.updated.append(CardRevision(id: card.id, front: front, back: back))
-            } else if decision.action == .remove || isStale {
+            } else if decision.action == .remove && !stillSupported || isStale {
                 revision.removed.append(card.id)
             }
         }
@@ -1153,6 +1278,10 @@ nonisolated struct AppleFlashcardEngine: FlashcardEngine {
         contain. Skip headings, and don't ask yes/no or true/false questions. Ask about the \
         subject itself, never about the notes, the slides, or what a speaker said or mentioned. \
         Write plain text.
+
+        Lines starting with » are comments the student or teacher left on the notes; treat \
+        what they say as part of the notes. Points marked EXAM PRIORITY will be on the exam: \
+        always write a card for each of them.
 
         Deck size: \(density.promptGuidance)
         """

@@ -95,10 +95,40 @@ final class Deck {
         cards.filter { $0.activeSyncBadge != nil }.count
     }
 
+    var priorityCount: Int {
+        cards.filter(\.isPriority).count
+    }
+
     func addCard(front: String, back: String, badge: SyncBadge? = nil) {
         let card = Flashcard(front: front, back: back, order: nextCardOrder)
         card.setBadge(badge)
         modelContext?.insert(card)
         cards.append(card)
+    }
+
+    /// Adds generated cards, putting cards for exam priorities first. Set `sourceText` first.
+    func addGeneratedCards(_ generated: [GeneratedCard]) {
+        let items = PriorityNotes.items(in: sourceText)
+        let flagged = generated.map { PriorityNotes.isPriority(front: $0.front, back: $0.back, items: items) }
+        let ordered = zip(generated, flagged).filter(\.1) + zip(generated, flagged).filter { !$0.1 }
+        for (card, isPriority) in ordered {
+            let flashcard = Flashcard(
+                front: card.front.trimmingCharacters(in: .whitespacesAndNewlines),
+                back: card.back.trimmingCharacters(in: .whitespacesAndNewlines),
+                order: nextCardOrder
+            )
+            flashcard.isPriority = isPriority
+            modelContext?.insert(flashcard)
+            cards.append(flashcard)
+        }
+    }
+
+    /// Re-checks which cards cover exam priorities, after the notes or their comments change.
+    func refreshPriorities() {
+        let items = PriorityNotes.items(in: sourceText)
+        for card in cards {
+            let isPriority = PriorityNotes.isPriority(front: card.front, back: card.back, items: items)
+            if card.isPriority != isPriority { card.isPriority = isPriority }
+        }
     }
 }

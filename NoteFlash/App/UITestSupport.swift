@@ -65,7 +65,7 @@ enum UITestSupport {
 /// (where Apple's on-device model can't run).
 nonisolated struct SampleFlashcardEngine: FlashcardEngine {
     func generateDeck(from source: NoteSource, density: CardDensity, progress: GenerationProgressHandler?) async throws -> GeneratedDeck {
-        let lines = TextDiff.lines(of: source.text).filter { !$0.hasPrefix("#") }
+        let lines = TextDiff.lines(of: source.text).filter { !$0.hasPrefix("#") && !CommentWeaver.isCommentLine($0) }
         let sections = max(1, min(4, lines.count / 3))
         let steps = 24
         let simulatesLimit = Self.takeSimulatedLimit()
@@ -252,7 +252,11 @@ struct SampleDriveDataSource: DriveDataSource {
         case .document:
             break
         }
-        return DriveFileContent(title: name, text: """
+        let sampleComments = known.id == "d-cells" ? [
+            DriveComment(quote: "Mitochondria make most of the cell's ATP.", content: "This will be on the exam — know the Krebs cycle too"),
+            DriveComment(quote: "Ribosomes build proteins.", content: "Ribosomes are found free or on the rough ER", replies: ["Good catch!"]),
+        ] : []
+        return DriveFileContent(title: name, text: CommentWeaver.weave(sampleComments, into: """
             # \(name)
             ## Overview
             These are sample notes for previewing a Google Doc in NoteFlash.
@@ -263,7 +267,7 @@ struct SampleDriveDataSource: DriveDataSource {
             Photosynthesis | Converts light energy into chemical energy
             Chlorophyll | Green pigment that absorbs light
             The Calvin cycle takes place in the stroma and uses ATP and NADPH to build sugars.
-            """, kind: .document)
+            """), kind: .document)
     }
 
     func thumbnail(for item: DriveItem, auth: GoogleAuth) async -> UIImage? { nil }

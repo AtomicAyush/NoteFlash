@@ -10,6 +10,7 @@ struct DeckDetailView: View {
 
     @State private var studyMode: StudyMode?
     @State private var starredOnly = false
+    @State private var priorityOnly = false
     @State private var editingCard: Flashcard?
     @State private var isAddingCard = false
     @State private var isEditingNotes = false
@@ -20,14 +21,22 @@ struct DeckDetailView: View {
     @State private var isConfirmingReset = false
     @State private var errorMessage: String?
 
-    private var cards: [Flashcard] { deck.sortedCards }
+    /// Exam priorities first, then in deck order.
+    private var cards: [Flashcard] {
+        let sorted = deck.sortedCards
+        return sorted.filter(\.isPriority) + sorted.filter { !$0.isPriority }
+    }
     private var starredCards: [Flashcard] { cards.filter(\.isStarred) }
+    private var priorityCards: [Flashcard] { cards.filter(\.isPriority) }
     private var isBusy: Bool { sync.isBusy(deck) }
     private var deckJob: ProcessingJob? { processing.unfinishedJob(forDeck: deck.id) }
     private var isJobRunning: Bool { deckJob?.isRunning == true }
 
     private var studyCards: [Flashcard] {
-        starredOnly && !starredCards.isEmpty ? starredCards : cards
+        var chosen = cards
+        if starredOnly && !starredCards.isEmpty { chosen = chosen.filter(\.isStarred) }
+        if priorityOnly && !priorityCards.isEmpty { chosen = chosen.filter(\.isPriority) }
+        return chosen.isEmpty ? cards : chosen
     }
 
     var body: some View {
@@ -60,6 +69,15 @@ struct DeckDetailView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
 
+                if !priorityCards.isEmpty {
+                    Toggle(isOn: $priorityOnly) {
+                        Label {
+                            Text("Study only exam priorities (\(priorityCards.count))")
+                        } icon: {
+                            Image(systemName: "flag.fill").foregroundStyle(.orange)
+                        }
+                    }
+                }
                 if !starredCards.isEmpty {
                     Toggle("Study only starred (\(starredCards.count))", systemImage: "star.fill", isOn: $starredOnly)
                 }
@@ -328,8 +346,12 @@ private struct CardRow: View {
                 Text(card.back)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                if card.activeSyncBadge != nil || card.masteryLevel >= Flashcard.masteredLevel || card.isUserEdited {
+                if card.isPriority || card.activeSyncBadge != nil || card.masteryLevel >= Flashcard.masteredLevel || card.isUserEdited {
                     HStack(spacing: 6) {
+                        if card.isPriority {
+                            Label("On the exam", systemImage: "flag.fill")
+                                .foregroundStyle(.orange)
+                        }
                         if let badge = card.activeSyncBadge {
                             SyncBadgeView(badge: badge)
                         }

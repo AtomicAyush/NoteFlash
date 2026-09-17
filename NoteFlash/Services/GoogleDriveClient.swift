@@ -373,6 +373,34 @@ nonisolated enum GoogleDriveClient {
         )
     }
 
+    /// A file's comments and their replies, leaving out deleted ones. Needs the drive.readonly scope.
+    @concurrent
+    static func comments(accessToken: String, id: String) async throws -> [DriveComment] {
+        var comments: [DriveComment] = []
+        var pageToken: String?
+        var pages = 0
+        repeat {
+            var items = [
+                URLQueryItem(name: "fields", value: "nextPageToken,comments(content,quotedFileContent/value,deleted,modifiedTime,replies(content,deleted))"),
+                URLQueryItem(name: "pageSize", value: "100"),
+            ]
+            if let pageToken { items.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+            let data = try await get(path: "files/\(id)/comments", queryItems: items, accessToken: accessToken)
+            let page = try JSONDecoder().decode(CommentList.self, from: data)
+            comments += (page.comments ?? []).filter { $0.deleted != true }.map { comment in
+                DriveComment(
+                    quote: comment.quotedFileContent?.value,
+                    content: comment.content ?? "",
+                    replies: (comment.replies ?? []).filter { $0.deleted != true }.compactMap(\.content),
+                    modified: parseDate(comment.modifiedTime)
+                )
+            }
+            pageToken = page.nextPageToken
+            pages += 1
+        } while pageToken != nil && pages < 10
+        return comments
+    }
+
     /// A file's bytes (for PDFs and PowerPoint files). Needs the drive.readonly scope.
     @concurrent
     static func download(accessToken: String, id: String) async throws -> Data {
@@ -500,6 +528,23 @@ nonisolated enum GoogleDriveClient {
 
     private struct FileName: Decodable {
         let name: String
+    }
+
+    private struct CommentList: Decodable {
+        struct Comment: Decodable {
+            struct Quote: Decodable { let value: String? }
+            struct Reply: Decodable {
+                let content: String?
+                let deleted: Bool?
+            }
+            let content: String?
+            let quotedFileContent: Quote?
+            let deleted: Bool?
+            let modifiedTime: String?
+            let replies: [Reply]?
+        }
+        let nextPageToken: String?
+        let comments: [Comment]?
     }
 
     private struct MetadataResponse: Decodable {

@@ -148,7 +148,13 @@ final class DriveFileReader {
             kind = reference.kind ?? .document
         }
 
-        let version = metadata?.version.map { "v:\($0)" }
+        // Comments carry extra notes (and exam hints). Adding or editing one doesn't change the
+        // file's version, so their fingerprint is part of the version.
+        var comments: [DriveComment] = []
+        if kind == .document || kind == .presentation, auth.canReadDriveFiles {
+            comments = (try? await authorized { try await GoogleDriveClient.comments(accessToken: $0, id: reference.id) }) ?? []
+        }
+        let version = metadata?.version.map { "v:\($0)" + (comments.isEmpty ? "" : "|c:\(CommentWeaver.fingerprint(comments))") }
         if let version, version == knownVersion { return nil }
         let title = metadata?.name ?? reference.name
 
@@ -157,7 +163,10 @@ final class DriveFileReader {
             let document = try await authorized {
                 try await GoogleDocsClient.fetchViaAPI(documentID: reference.id, accessToken: $0)
             }
-            return DriveFileContent(title: document.title ?? title, text: document.text, kind: .document, version: version)
+            return DriveFileContent(
+                title: document.title ?? title, text: CommentWeaver.weave(comments, into: document.text),
+                kind: .document, version: version
+            )
 
         case .presentation:
             guard auth.canReadDriveFiles else { throw GoogleDriveClient.DriveError.missingPermission }
@@ -166,14 +175,17 @@ final class DriveFileReader {
                     try await GoogleDriveClient.export(accessToken: $0, id: reference.id, mimeType: DriveMimeType.powerPoint)
                 }
                 let slides = try await Self.extractPowerPoint(data)
-                return DriveFileContent(title: title, text: slides.text, kind: .presentation, pageCount: slides.slideCount, version: version)
+                return DriveFileContent(
+                    title: title, text: CommentWeaver.weave(comments, into: slides.text),
+                    kind: .presentation, pageCount: slides.slideCount, version: version
+                )
             } catch GoogleDriveClient.DriveError.exportTooLarge {
                 // Image-heavy decks can exceed Drive's export limit; plain text is much smaller.
                 let data = try await authorized {
                     try await GoogleDriveClient.export(accessToken: $0, id: reference.id, mimeType: DriveMimeType.plainText)
                 }
                 let text = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\u{FEFF}", with: "")
-                return DriveFileContent(title: title, text: text, kind: .presentation, version: version)
+                return DriveFileContent(title: title, text: CommentWeaver.weave(comments, into: text), kind: .presentation, version: version)
             }
 
         case .pdf, .powerPoint:
@@ -231,8 +243,7 @@ final class DriveFileReader {
     ) async throws -> DriveFileContent? {
         switch reference.kind {
         case .document:
-            let document = try await GoogleDocsClient.fetchPublicExport(documentID: reference.id)
-            return DriveFileContent(title: document.title, text: document.text, kind: .document)
+            return try await publicDocument(reference.id)
 
         case .presentation:
             let url = URL(string: "https://docs.google.com/presentation/d/\(reference.id)/export/pptx")!
@@ -252,8 +263,7 @@ final class DriveFileReader {
                 download = try await publicDownload(url)
             } catch ReadError.notShared where reference.kind == nil {
                 // Bare IDs and older links may be Docs, which download differently.
-                let document = try await GoogleDocsClient.fetchPublicExport(documentID: reference.id)
-                return DriveFileContent(title: document.title, text: document.text, kind: .document)
+                return try await publicDocument(reference.id)
             }
             let version = fingerprint(download.data)
             if version == knownVersion { return nil }
@@ -261,6 +271,12 @@ final class DriveFileReader {
                 ofFile: download.data, title: download.fileName ?? reference.name, version: version, onPhase: onPhase
             )
         }
+    }
+
+    nonisolated private static func publicDocument(_ id: String) async throws -> DriveFileContent {
+        let document = try await GoogleDocsClient.fetchPublicExport(documentID: id)
+        let comments = await GoogleDocsClient.fetchPublicComments(documentID: id)
+        return DriveFileContent(title: document.title, text: CommentWeaver.weave(comments, into: document.text), kind: .document)
     }
 
     nonisolated private struct PublicDownload {

@@ -246,6 +246,11 @@ private struct DeckRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if deck.priorityCount > 0 {
+                    Label("^[\(deck.priorityCount) card](inflect: true) on the exam", systemImage: "flag.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 Text(sort.activity(for: deck))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)

@@ -191,6 +191,13 @@ nonisolated final class SectionCache: @unchecked Sendable {
         lock.withLock { entries[key] }
     }
 
+    func removeAll() {
+        lock.withLock {
+            entries = [:]
+            order = []
+        }
+    }
+
     func store(_ entry: Entry, for key: String) {
         lock.withLock {
             if entries.updateValue(entry, forKey: key) == nil {

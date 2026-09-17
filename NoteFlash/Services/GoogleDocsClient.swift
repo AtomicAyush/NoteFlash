@@ -107,6 +107,15 @@ nonisolated enum GoogleDocsClient {
 }
 
 nonisolated extension GoogleDocsClient {
+    /// Comments on a doc shared by link, read from its Word export (the plain-text export has none).
+    @concurrent
+    static func fetchPublicComments(documentID: String) async -> [DriveComment] {
+        guard let url = URL(string: "https://docs.google.com/document/d/\(documentID)/export?format=docx"),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
+        return DocxComments.comments(in: data)
+    }
+
     /// The doc's name from an export's download filename, e.g.
     /// `attachment; filename="Notes.txt"; filename*=UTF-8''My%20Notes.txt` → "My Notes".
     static func documentTitle(fromContentDisposition header: String?) -> String? {

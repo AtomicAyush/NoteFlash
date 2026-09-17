@@ -109,6 +109,18 @@ struct FlashcardStudyView: View {
         .accessibilityAction {
             withAnimation(.spring(duration: 0.4)) { isFlipped.toggle() }
         }
+        .overlay(alignment: .topLeading) {
+            if card.isPriority {
+                Label("On the exam", systemImage: "flag.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.orange.opacity(0.14), in: .capsule)
+                    .padding(16)
+                    .accessibilityLabel("On the exam")
+            }
+        }
         .overlay(alignment: .topTrailing) {
             Button {
                 card.isStarred.toggle()

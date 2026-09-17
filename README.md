@@ -17,6 +17,11 @@ A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or 
   - **Handwriting:** in PDFs from note-taking apps, handwriting is read along with typed text. Several images become one deck with a page per image.
   - **Open in NoteFlash:** apps that offer "Open in…" can also send PDFs, images, PowerPoint, and text files straight to the New Deck screen.
 - **AI-written cards:** Apple Intelligence runs on the device by default (free, private, works offline). Claude is available as an option in Settings.
+- **Comments and exam priorities (Google Docs and Slides):** comments and replies are read along with the notes, since they often hold extra notes.
+  - **Exam priorities:** comments that say a point will be on the exam, test, quiz, midterm, or final (or say "important", "know this", or "high-yield") mark that point as an exam priority, and so do lines in the notes that say so.
+  - **Coverage:** every exam priority gets cards, even in a compact deck.
+  - **Marking:** those cards are marked **On the exam**, listed first, and can be studied on their own.
+  - **Sync:** adding or editing a comment updates the deck like any other change.
 - **Google Drive sync:** linked files are checked every 2 minutes while the app is open, and again through iOS background app refresh. Edits update, remove, or add only the cards they affect. Files shared by link that aren't Docs have to be downloaded in full to check them, so they're checked every 15 minutes unless you tap **Check Now**.
   - Cards you write or edit by hand are locked and never overwritten.
   - Changed cards get a "New" or "Updated" badge.
@@ -78,7 +83,9 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
 - **Sections:** long notes are split into sections that fit the model's 4,096-token context.
 - **Card format:** each card is generated fact → question → answer, which gives the small model better questions.
 - **Refused sections:** Apple's default safety filter often refuses ordinary history or health notes when it has to return structured output. Those sections are retried as plain-text Q/A under the permissive safety setting.
-- **Thin sections:** a section that yields fewer cards than expected gets a second pass.
+- **Repetition:** the small model sometimes starts rewriting cards it already wrote. `RepetitionWatch` notices four repeats and stops the response, instead of letting it run to its card limit and never reach the section's last lines.
+- **Missed lines:** after a section, `CardMatcher.uncoveredLines` finds the lines no card is about; if there are enough of them, a quick plain-text pass covers just those lines (compact decks skip minor facts on purpose). This is also how a thin section gets a second pass.
+- **Mismatched questions:** a "What was the Sugar Act?" card answered only with "1764" is reworded to ask "When was…".
 - **Other failures:** if structured output fails or times out, the section is split or retried as plain text. iOS 26 (`LanguageModelSession.GenerationError`) and iOS 27 (`LanguageModelError`, `LanguageModelSession.Error`, `SystemLanguageModel.Error`, `GeneratedContent.ParsingError`) errors are grouped by `AppleModelFailure`. A model that can't be loaded, such as while it's downloading after an iOS update, gets its own message.
 
 **Reading files.**
@@ -88,6 +95,14 @@ While the consent screen is in *Testing* mode, Google expires refresh tokens aft
   - **Slides:** exported as .pptx, or as plain text for decks over Drive's 10 MB export limit.
   - **PDFs and PowerPoint files:** downloaded.
   - **Shared by link:** without sign-in, or when the signed-in account can't open a file, public export and download links are used. Their type is detected from the downloaded bytes.
+
+**Comments and exam priorities.**
+- **Reading comments:** `DriveFileReader` reads comments and replies with the Drive API (`comments.list`, which needs the `drive.readonly` permission). For Docs shared by link, it reads them from the doc's Word export instead (`DocxComments`), since the plain-text export has none. Link-shared Slides and PDF or PowerPoint files don't get comments.
+- **Placing comments:** `CommentWeaver` puts each comment on the line after the text it's attached to, as `» Comment on “…”: …`. Comments that mention an exam become `» EXAM PRIORITY — comment on “…”: …`. Comments with no matching text go in a Comments section at the end.
+- **Change detection:** comment changes don't change a file's Drive version, so a fingerprint of the comments is part of the version NoteFlash compares.
+- **Priorities:** `PriorityNotes` finds exam priorities in the notes (flagged comments, plus lines with phrases like "will be on the exam").
+  - **Card writing:** both engines are told what comments and exam priorities are. Apple Intelligence also runs a short focused pass for each exam priority that's attached to text, adding up to three distinct cards.
+  - **Marking:** after generating, regenerating, or updating, cards whose words match a priority (two key words, or the only one) are marked `isPriority`. New cards for priorities go first.
 
 **Sharing from other apps.**
 - **Handoff:** a share extension can't open its app or run long jobs, so `NoteFlashShare` copies what was shared into an App Group folder (`group.com.ayushkansal.NoteFlash`). The item's manifest is written last, so the app never reads a half-written item.

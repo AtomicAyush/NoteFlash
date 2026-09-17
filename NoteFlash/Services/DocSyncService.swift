@@ -213,10 +213,9 @@ final class DocSyncService {
                 context.delete(card)
             }
             deck.cards.removeAll { !$0.isUserEdited }
-            for card in generated.cards {
-                deck.addCard(front: card.front, back: card.back)
-            }
             deck.sourceText = notes
+            deck.addGeneratedCards(generated.cards)
+            deck.refreshPriorities()
             if let latest {
                 deck.sourceHash = TextDiff.fingerprint(of: notes)
                 deck.sourceVersion = latest.version
@@ -242,6 +241,7 @@ final class DocSyncService {
     private func revise(_ deck: Deck, toMatch newText: String, reporter: ProcessingReporter = .silent) async throws -> String {
         guard let changes = TextDiff.changes(from: deck.sourceText, to: newText) else {
             deck.sourceText = newText
+            deck.refreshPriorities()
             return "No changes to the notes"
         }
 
@@ -308,6 +308,8 @@ final class DocSyncService {
         }
 
         deck.sourceText = newText
+        // New or removed exam comments can change which existing cards are priorities.
+        deck.refreshPriorities()
         deck.updatedAt = .now
         deck.lastSyncSummary = summary
         if !parts.isEmpty { deck.lastChangedAt = .now }

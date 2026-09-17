@@ -171,6 +171,8 @@ struct DocTextView: View {
             case bullet(Int)
             case table
             case paragraph
+            /// A comment left on the notes; `priority` when it says the point is on the exam.
+            case comment(priority: Bool)
         }
         let id: Int
         let kind: Kind
@@ -183,6 +185,14 @@ struct DocTextView: View {
             guard !trimmed.isEmpty else { return nil }
             let indent = raw.prefix { $0 == " " || $0 == "\t" }.count / 2
 
+            if CommentWeaver.isCommentLine(trimmed) {
+                let body = String(trimmed.dropFirst(CommentWeaver.commentPrefix.count))
+                let isPriority = body.hasPrefix(CommentWeaver.priorityLabel)
+                let shown = isPriority
+                    ? String(body.dropFirst(CommentWeaver.priorityLabel.count)).trimmingCharacters(in: CharacterSet(charactersIn: " —"))
+                    : body
+                return Line(id: index, kind: .comment(priority: isPriority), text: shown.prefix(1).uppercased() + shown.dropFirst())
+            }
             if trimmed.hasPrefix("#") {
                 let level = trimmed.prefix { $0 == "#" }.count
                 let title = trimmed.dropFirst(level).trimmingCharacters(in: .whitespaces)
@@ -221,6 +231,27 @@ struct DocTextView: View {
                         .background(Color(uiColor: .secondarySystemBackground), in: .rect(cornerRadius: 6))
                 case .paragraph:
                     Text(line.text)
+                case .comment(let priority):
+                    VStack(alignment: .leading, spacing: 3) {
+                        if priority {
+                            Label("On the exam", systemImage: "flag.fill")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.orange)
+                        }
+                        Label {
+                            Text(line.text)
+                        } icon: {
+                            Image(systemName: "text.bubble")
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        (priority ? Color.orange.opacity(0.12) : Color(uiColor: .secondarySystemBackground)),
+                        in: .rect(cornerRadius: 8)
+                    )
                 }
             }
         }

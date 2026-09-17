@@ -150,6 +150,8 @@ nonisolated enum CardWriting {
         - Stay faithful to the notes. Don't add facts the notes don't contain, though you may fix obvious typos.
         - Avoid duplicate or overlapping cards, and avoid yes/no questions.
         - Ask about the subject itself, never about the notes or slides (what was mentioned, what a speaker emphasized). Speaker notes from slides are a source of facts, not a topic.
+        - Lines starting with » are comments left on the notes (often by the student or teacher). Treat what they say as part of the notes, but don't ask about the comments themselves.
+        - Points marked EXAM PRIORITY will be on the exam. Every one of them must get at least one clear, complete card; never skip them, even when writing a compact deck.
         - Keep the notes' own terminology. Write plain text without Markdown; write math inline (for example, x^2 + 3x).
         - Order cards the way their topics appear in the notes.
         """
@@ -170,8 +172,8 @@ nonisolated enum CardWriting {
         var seen = existing
         var result: [GeneratedCard] = []
         for card in cards {
-            let front = card.front.trimmingCharacters(in: .whitespacesAndNewlines)
-            let back = card.back.trimmingCharacters(in: .whitespacesAndNewlines)
+            let back = removingMarkers(card.back)
+            let front = askingForDate(removingMarkers(card.front), answer: back)
             let frontKey = normalizedKey(front)
             let backKey = normalizedKey(back)
             guard !frontKey.isEmpty, !backKey.isEmpty, !front.hasPrefix("#") else { continue }
@@ -186,9 +188,80 @@ nonisolated enum CardWriting {
 
     private static let metaPhrases = [
         "speaker notes", "presenter notes", "in the notes", "the notes say", "according to the notes",
+        "the comment", "a comment", "the comments", "exam priority", "on the exam", "on the test", "on the quiz",
         "on the slide", "in the slides", "the speaker", "the presenter", "was mentioned", "were mentioned",
         "is mentioned", "are mentioned",
     ]
+
+    /// Strips comment and priority markers the model sometimes copies into a card.
+    static func removingMarkers(_ text: String) -> String {
+        var result = text
+        for marker in ["» ", "»", "EXAM PRIORITY — ", "EXAM PRIORITY: ", "EXAM PRIORITY"] {
+            result = result.replacingOccurrences(of: marker, with: "")
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "What was the Sugar Act?" answered only with "1764" asks for a definition but gives a
+    /// date; this asks for the date instead ("When was the Sugar Act?").
+    static func askingForDate(_ front: String, answer: String) -> String {
+        let words = front.split(separator: " ", maxSplits: 2)
+        guard words.count == 3, words[0].lowercased() == "what",
+              ["was", "were", "is", "are"].contains(words[1].lowercased()),
+              isOnlyDate(answer) else { return front }
+        // "What was the year of…" already asks for the date ("Independence Day" is fine).
+        let subject = normalizedKey(String(words[2])).split(separator: " ")
+        let head = subject.first { !["the", "a", "an"].contains($0) } ?? ""
+        guard !quantityWords.contains(String(head)) else { return front }
+        return "When \(words[1]) \(words[2])"
+    }
+
+    /// Words that, leading the subject, mean the question already asks for a date or a number.
+    private static let quantityWords: Set<String> = [
+        "date", "dates", "year", "years", "day", "month", "decade", "century", "time", "period", "era",
+        "number", "size", "population", "amount", "count", "cost", "price", "total", "percent", "percentage",
+        "age", "value", "score", "rate", "length",
+    ]
+
+    private static let months: Set<String> = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep",
+        "sept", "oct", "nov", "dec",
+    ]
+    private static let dateConnectors: Set<String> = [
+        "in", "on", "around", "about", "circa", "c", "from", "between", "to", "and", "until",
+        "bc", "bce", "ad", "ce", "the", "early", "mid", "late",
+    ]
+
+    /// True for answers that are just a date, year, or span of years ("1754–1763", "April 19, 1775").
+    static func isOnlyDate(_ answer: String) -> Bool {
+        let tokens = answer.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+        var hasDate = false
+        for token in tokens {
+            if months.contains(token) || isYear(token) {
+                hasDate = true
+            } else if !isDay(token), !dateConnectors.contains(token) {
+                return false
+            }
+        }
+        return hasDate
+    }
+
+    /// "4", "19", or "19th".
+    private static func isDay(_ token: String) -> Bool {
+        let digits = ["st", "nd", "rd", "th"].contains(where: token.hasSuffix) ? String(token.dropLast(2)) : token
+        guard digits.count <= 2, let day = Int(digits) else { return false }
+        return (1...31).contains(day)
+    }
+
+    /// "1776" or "1760s". A count like "100,000" splits into "100" and "000", and "000" is no year.
+    private static func isYear(_ token: String) -> Bool {
+        let digits = token.hasSuffix("s") ? String(token.dropLast()) : token
+        guard (3...4).contains(digits.count), let value = Int(digits) else { return false }
+        return (100...2_199).contains(value)
+    }
 
     /// True for questions about the notes themselves ("What was mentioned in the speaker notes?").
     static func isAboutTheNotes(_ normalizedFront: String) -> Bool {
