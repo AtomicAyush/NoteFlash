@@ -1,5 +1,35 @@
 # NoteFlash
 
+<p>
+  <img alt="iOS%20%2F%20iPadOS" src="https://img.shields.io/badge/iOS%20%2F%20iPadOS-26%2B-000000?logo=apple&logoColor=white">
+  <img alt="Swift" src="https://img.shields.io/badge/Swift-SwiftUI%20%C2%B7%20SwiftData-F05138?logo=swift&logoColor=white">
+  <img alt="AI" src="https://img.shields.io/badge/AI-Apple%20Foundation%20Models-6E56CF">
+</p>
+
+> **Turn notes, PDFs, slides, and Google Drive files into flashcard decks, written on-device by Apple Intelligence.**
+
+### Highlights
+- **On-device LLM pipeline:** splits long notes to fit the model's 4,096-token context, generates each card fact → question → answer, stops repetition loops, retries refused sections, and runs a second pass over lines no card covers.
+- **Incremental Google Drive sync:** OAuth 2.0 + PKCE with no SDK; when a linked Doc, Slides deck, or PDF changes, a line diff regenerates only the affected cards.
+- **File parsing from scratch:** PowerPoint (.pptx) through a hand-written ZIP reader on Apple's Compression framework; PDF and photo text through PDFKit and Vision OCR.
+- **Resilient background jobs:** progress in the Dynamic Island and on the Lock Screen, and a Claude API fallback when on-device rate limits hit.
+- **~14.5k lines of Swift** · SwiftUI · SwiftData · share extension
+
+```mermaid
+flowchart LR
+  A[Notes · PDF · PPTX · photos · Drive] --> B[Text extraction]
+  B --> C[Section splitter]
+  C --> D{Engine}
+  D -->|on-device| E[Apple Foundation Models]
+  D -->|fallback| F[Claude API]
+  E --> G[Cards + coverage check]
+  F --> G
+  G --> H[(SwiftData)]
+  I[Drive file changed] --> J[Line diff] --> C
+```
+
+---
+
 A Quizlet-style flashcard app for iPhone and iPad. Paste notes, import a PDF or PowerPoint file, or link a Google Doc, Google Slides presentation, or file in Google Drive, and NoteFlash turns them into a deck of flashcards. Linked Drive files stay in sync: when the file changes, only the affected cards are updated, and new cards are added for new material.
 
 ## Features
